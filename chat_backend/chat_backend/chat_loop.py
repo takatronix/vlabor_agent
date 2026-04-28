@@ -56,13 +56,24 @@ async def run_chat(
             yield {"type": "error", "message": f"max iterations ({max_iterations}) hit"}
             return
 
+        # Stream the assistant turn so the UI shows incremental text
+        # rather than a single dump at the end. Anthropic's streaming
+        # API yields text deltas during generation; tool_use blocks
+        # arrive complete in the final message.
         try:
-            resp = await client.messages.create(
+            text_so_far = ""
+            async with client.messages.stream(
                 model=model,
                 max_tokens=1024,
                 tools=tools or None,  # don't send empty array — confuses the API
                 messages=messages,
-            )
+            ) as stream:
+                async for chunk in stream.text_stream:
+                    if not chunk:
+                        continue
+                    text_so_far += chunk
+                    yield {"type": "assistant_text_delta", "text": chunk}
+                resp = await stream.get_final_message()
         except Exception as exc:  # pragma: no cover - surfaced to caller
             log.exception("anthropic call failed")
             yield {"type": "error", "message": f"anthropic call failed: {exc}"}
@@ -78,6 +89,12 @@ async def run_chat(
             if btype == "text":
                 text = getattr(block, "text", "") or ""
                 if text:
+                    # Emit a final "full text" event AFTER the deltas so
+                    # frontends that only handle the legacy event shape
+                    # still get one consolidated message per text block.
+                    # Frontends that handle deltas use this as a "this
+                    # block is complete" signal and drop their delta
+                    # buffer.
                     yield {"type": "assistant_text", "text": text}
                 assistant_blocks.append({"type": "text", "text": text})
             elif btype == "tool_use":

@@ -91,6 +91,7 @@ class ChatBackendConfig:
                 McpServerConfig(name="vlabor-perception", transport="sse", url="http://127.0.0.1:9102/sse"),
                 McpServerConfig(name="vlabor-moveit",     transport="sse", url="http://127.0.0.1:9103/sse"),
                 McpServerConfig(name="vlabor-arm",        transport="sse", url="http://127.0.0.1:9104/sse"),
+                McpServerConfig(name="vlabor-visual",     transport="sse", url="http://127.0.0.1:9105/sse"),
             ]
         return cfg
 

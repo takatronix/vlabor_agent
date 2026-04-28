@@ -555,7 +555,16 @@ function connect() {
   ws.addEventListener('message', (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch (_) { return; }
-    if (m.type === 'assistant_text') appendAssistantText(m.text);
+    if (m.type === 'assistant_text_delta') appendAssistantText(m.text);
+    else if (m.type === 'assistant_text') {
+      // Final consolidated text for this assistant block. If we already
+      // streamed the same content via deltas, skip — otherwise (legacy
+      // backend, no streaming) render the whole thing now.
+      const bubble = activeAssistantBubble;
+      if (!bubble || (bubble.dataset.raw || '') !== m.text) appendAssistantText(m.text);
+      // Close out the current bubble so the next assistant turn opens a fresh one.
+      activeAssistantBubble = null;
+    }
     else if (m.type === 'tool_use_start') addToolCall(m.name, m.input, m.id);
     else if (m.type === 'tool_use_result') finishToolCall(m.id, m.name, m.is_error, m.summary, m.content);
     else if (m.type === 'conversation_created') {
