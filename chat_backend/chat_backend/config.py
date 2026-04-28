@@ -79,16 +79,18 @@ class ChatBackendConfig:
         if env_key_path := os.environ.get("VLABOR_AGENT_API_KEY_PATH"):
             cfg.api_key_path = env_key_path
 
-        # Phase 0 default: connect to vlabor-obs if no servers configured.
-        # That gives ``./run`` immediate utility on a vlabor host without
-        # any extra setup.
+        # Phase 0 default: connect to the full vlabor MCP set if no
+        # servers were configured. ``./run`` then has immediate utility
+        # on a vlabor host without any extra config. Operators on
+        # other robots will set ``mcp_servers`` in
+        # ~/.vlabor/agent/config.json instead.
         if not cfg.mcp_servers:
             cfg.mcp_servers = [
-                McpServerConfig(
-                    name="vlabor-obs",
-                    transport="sse",
-                    url="http://127.0.0.1:9100/sse",
-                ),
+                McpServerConfig(name="vlabor-obs",        transport="sse", url="http://127.0.0.1:9100/sse"),
+                McpServerConfig(name="vlabor-ros",        transport="sse", url="http://127.0.0.1:9101/sse"),
+                McpServerConfig(name="vlabor-perception", transport="sse", url="http://127.0.0.1:9102/sse"),
+                McpServerConfig(name="vlabor-moveit",     transport="sse", url="http://127.0.0.1:9103/sse"),
+                McpServerConfig(name="vlabor-arm",        transport="sse", url="http://127.0.0.1:9104/sse"),
             ]
         return cfg
 
