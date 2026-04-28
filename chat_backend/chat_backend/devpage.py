@@ -71,8 +71,59 @@ DEV_HTML = """<!doctype html>
 
     main {
       flex: 1; min-height: 0;
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      width: 100%;
+      max-width: 1200px; margin: 0 auto;
+    }
+    aside {
       display: flex; flex-direction: column;
-      max-width: 880px; width: 100%; margin: 0 auto;
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      min-height: 0;
+    }
+    aside .new-btn {
+      margin: 10px; padding: 8px 12px;
+      background: var(--accent); color: #0d1117;
+      border: 0; border-radius: 6px; cursor: pointer;
+      font-weight: 600; font-size: 13px;
+    }
+    aside .new-btn:hover { filter: brightness(1.15); }
+    aside .conv-list {
+      flex: 1; overflow-y: auto;
+      display: flex; flex-direction: column;
+      padding: 0 8px 10px;
+    }
+    aside .conv-item {
+      padding: 8px 10px; border-radius: 6px;
+      cursor: pointer; user-select: none;
+      display: flex; flex-direction: column; gap: 2px;
+      position: relative;
+    }
+    aside .conv-item:hover { background: rgba(255,255,255,0.04); }
+    aside .conv-item.active { background: rgba(88,166,255,0.12); }
+    aside .conv-title {
+      font-size: 13px; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    aside .conv-meta {
+      font-size: 10.5px; color: var(--muted);
+    }
+    aside .conv-del {
+      position: absolute; right: 6px; top: 6px;
+      background: transparent; border: 0; color: var(--muted);
+      font-size: 14px; cursor: pointer; opacity: 0; transition: opacity 0.15s;
+      padding: 2px 6px;
+    }
+    aside .conv-item:hover .conv-del { opacity: 1; }
+    aside .conv-del:hover { color: #f85149; }
+    aside .conv-empty {
+      padding: 12px; font-size: 12px; color: var(--muted); text-align: center;
+    }
+
+    .chat-panel {
+      display: flex; flex-direction: column;
+      min-height: 0;
       padding: 14px 16px 10px;
       gap: 10px;
     }
@@ -236,17 +287,25 @@ DEV_HTML = """<!doctype html>
     <button class="icon-btn" id="resetBtn" title="Clear chat (also drops history)">↺ Reset</button>
   </header>
   <main>
-    <div id="log">
-      <div class="empty" id="emptyState">
-        <div class="big">Ask the agent anything</div>
-        <div class="small">Tools come from the configured MCP servers. Markdown, tables, and images supported.</div>
+    <aside>
+      <button class="new-btn" id="newChatBtn" type="button">+ New chat</button>
+      <div class="conv-list" id="convList">
+        <div class="conv-empty">no conversations yet</div>
       </div>
-    </div>
-    <div class="composer">
-      <textarea id="input" rows="1"
-                placeholder="Type a message — Enter to send, Shift+Enter for newline"></textarea>
-      <button id="send" class="send-btn" type="button">Send</button>
-    </div>
+    </aside>
+    <section class="chat-panel">
+      <div id="log">
+        <div class="empty" id="emptyState">
+          <div class="big">Ask the agent anything</div>
+          <div class="small">Tools come from the configured MCP servers. Markdown, tables, and images supported.</div>
+        </div>
+      </div>
+      <div class="composer">
+        <textarea id="input" rows="1"
+                  placeholder="Type a message — Enter to send, Shift+Enter for newline"></textarea>
+        <button id="send" class="send-btn" type="button">Send</button>
+      </div>
+    </section>
   </main>
 
 <script>
@@ -268,6 +327,9 @@ const history = [];
 let ws = null;
 let inflight = false;
 let activeAssistantBubble = null;
+let conversationId = null;     // current conversation; null = "fresh, mint on first send"
+const convList = document.getElementById('convList');
+const newChatBtn = document.getElementById('newChatBtn');
 
 function escapeHtml(s) {
   return String(s == null ? '' : s)
@@ -409,11 +471,15 @@ function connect() {
     if (m.type === 'assistant_text') appendAssistantText(m.text);
     else if (m.type === 'tool_use_start') addToolCall(m.name, m.input, m.id);
     else if (m.type === 'tool_use_result') finishToolCall(m.id, m.name, m.is_error, m.summary, m.content);
-    else if (m.type === 'done') {
+    else if (m.type === 'conversation_created') {
+      conversationId = m.id;
+      refreshConversationList();
+    } else if (m.type === 'done') {
       activeAssistantBubble = null;
       inflight = false;
       sendBtn.disabled = false;
       if (m.stop_reason === 'no_api_key') appendSystem('(no API key — save one and resend)');
+      refreshConversationList();
     } else if (m.type === 'error') {
       activeAssistantBubble = null;
       inflight = false;
@@ -428,6 +494,8 @@ function connect() {
     } else if (m.type === 'transcript') {
       history.length = 0;
       for (const x of m.messages) history.push(x);
+      if (m.conversation_id) conversationId = m.conversation_id;
+      refreshConversationList();
     }
   });
 }
@@ -446,8 +514,119 @@ function submit() {
   addUser(text);
   input.value = '';
   autoSize();
-  ws.send(JSON.stringify({ type: 'user_message', text, history }));
+  ws.send(JSON.stringify({
+    type: 'user_message',
+    text,
+    history,
+    conversation_id: conversationId,
+  }));
 }
+
+// --- conversation list / load -----------------------------------------------
+
+async function refreshConversationList() {
+  let data;
+  try {
+    const resp = await fetch('/api/conversations');
+    data = await resp.json();
+  } catch (_) { return; }
+  const items = (data && data.conversations) || [];
+  convList.innerHTML = '';
+  if (!items.length) {
+    convList.innerHTML = '<div class="conv-empty">no conversations yet</div>';
+    return;
+  }
+  for (const c of items) {
+    const row = document.createElement('div');
+    row.className = 'conv-item' + (c.id === conversationId ? ' active' : '');
+    row.dataset.id = c.id;
+    row.innerHTML = `
+      <span class="conv-title">${escapeHtml(c.title || '(untitled)')}</span>
+      <span class="conv-meta">${escapeHtml(c.updated_at || '')} · ${c.message_count} msg</span>
+      <button class="conv-del" title="Delete">✕</button>`;
+    row.addEventListener('click', (e) => {
+      if (e.target.classList.contains('conv-del')) return;
+      loadConversation(c.id);
+    });
+    row.querySelector('.conv-del').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Delete this conversation?')) return;
+      try { await fetch('/api/conversations/' + encodeURIComponent(c.id), { method: 'DELETE' }); }
+      catch (_) {}
+      if (c.id === conversationId) {
+        conversationId = null;
+        history.length = 0;
+        log.innerHTML = '';
+        log.appendChild(empty);
+      }
+      await refreshConversationList();
+    });
+    convList.appendChild(row);
+  }
+}
+
+async function loadConversation(id) {
+  let payload;
+  try {
+    const resp = await fetch('/api/conversations/' + encodeURIComponent(id));
+    if (!resp.ok) return;
+    payload = await resp.json();
+  } catch (_) { return; }
+  conversationId = payload.id;
+  history.length = 0;
+  for (const m of (payload.messages || [])) history.push(m);
+  rerenderFromHistory();
+  await refreshConversationList();
+  input.focus();
+}
+
+function rerenderFromHistory() {
+  log.innerHTML = '';
+  if (!history.length) { log.appendChild(empty); return; }
+  for (const m of history) {
+    if (m.role === 'user') {
+      const text = extractText(m.content);
+      if (text) addUser(text);
+    } else if (m.role === 'assistant') {
+      activeAssistantBubble = null;
+      const blocks = Array.isArray(m.content) ? m.content : [];
+      for (const b of blocks) {
+        if (b.type === 'text' && b.text) appendAssistantText(b.text);
+        else if (b.type === 'tool_use') {
+          addToolCall(b.name || '(tool)', b.input || {}, b.id || '');
+          // Mark as pending; the matching tool_result comes from the
+          // next user message in the saved transcript.
+        }
+      }
+    } else if (m.role === 'user' && Array.isArray(m.content)) {
+      // tool_result blocks live inside a user message in Anthropic's
+      // shape — find them and update the matching tool card.
+      for (const b of m.content) {
+        if (b.type === 'tool_result') {
+          finishToolCall(b.tool_use_id || '', '(tool)',
+                         !!b.is_error, '', b.content || []);
+        }
+      }
+    }
+  }
+  activeAssistantBubble = null;
+}
+
+function extractText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter(b => b && b.type === 'text').map(b => b.text || '').join('');
+}
+
+newChatBtn.addEventListener('click', () => {
+  conversationId = null;
+  history.length = 0;
+  activeAssistantBubble = null;
+  log.innerHTML = '';
+  log.appendChild(empty);
+  refreshConversationList();
+  input.focus();
+});
 
 sendBtn.addEventListener('click', submit);
 input.addEventListener('keydown', (e) => {
@@ -457,13 +636,19 @@ input.addEventListener('keydown', (e) => {
 });
 
 resetBtn.addEventListener('click', () => {
+  // Reset within the *current* conversation: drop client-side history
+  // so the next send starts fresh, but the saved conversation file is
+  // left alone (delete from the sidebar to discard it on disk).
   history.length = 0;
+  conversationId = null;
   log.innerHTML = '';
   log.appendChild(empty);
-  appendSystem('chat cleared');
+  appendSystem('chat cleared (new conversation will be created on next send)');
+  refreshConversationList();
 });
 
 connect();
+refreshConversationList();
 input.focus();
 </script>
 </body>

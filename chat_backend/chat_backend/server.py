@@ -31,6 +31,7 @@ from .chat_loop import run_chat
 from .config import ChatBackendConfig, read_api_key
 from .devpage import DEV_HTML
 from .mcp_pool import McpPool
+from .storage import ConversationStore
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,9 @@ async def _on_startup(app: web.Application) -> None:
     pool = McpPool(cfg.mcp_servers)
     await pool.start()
     app["mcp_pool"] = pool
+    app["store"] = ConversationStore()
     log.info("[startup] MCP servers connected: %s", pool.server_names())
+    log.info("[startup] conversation store: %s", app["store"].root)
 
 
 async def _on_cleanup(app: web.Application) -> None:
@@ -63,6 +66,37 @@ async def _healthz(request: web.Request) -> web.Response:
             "tool_count": len(pool.tools_for_anthropic()),
         }
     )
+
+
+async def _list_conversations(request: web.Request) -> web.Response:
+    store: ConversationStore = request.app["store"]
+    return web.json_response(
+        {"conversations": [s.to_dict() for s in store.list()]}
+    )
+
+
+async def _get_conversation(request: web.Request) -> web.Response:
+    store: ConversationStore = request.app["store"]
+    cid = request.match_info.get("cid", "")
+    payload = store.load(cid)
+    if payload is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(payload)
+
+
+async def _delete_conversation(request: web.Request) -> web.Response:
+    store: ConversationStore = request.app["store"]
+    cid = request.match_info.get("cid", "")
+    ok = store.delete(cid)
+    if not ok:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response({"ok": True})
+
+
+async def _create_conversation(request: web.Request) -> web.Response:
+    store: ConversationStore = request.app["store"]
+    cid = store.create()
+    return web.json_response({"id": cid})
 
 
 async def _ws_chat(request: web.Request) -> web.WebSocketResponse:
@@ -111,6 +145,15 @@ async def _ws_chat(request: web.Request) -> web.WebSocketResponse:
         history = payload.get("history") or []
         if not isinstance(history, list):
             history = []
+        # Each user turn carries the conversation_id (or none for first
+        # turn — backend mints one and announces it). Persisting on
+        # the server side means a tab refresh, a different browser, or
+        # a different machine all see the same chat history.
+        store: ConversationStore = request.app["store"]
+        cid = (payload.get("conversation_id") or "").strip()
+        if not cid:
+            cid = store.create()
+            await ws.send_json({"type": "conversation_created", "id": cid})
 
         messages = list(history)
         messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
@@ -124,8 +167,10 @@ async def _ws_chat(request: web.Request) -> web.WebSocketResponse:
         ):
             await ws.send_json(event)
         # The chat loop mutates ``messages`` in place; echo the final
-        # transcript back so the client can persist it.
-        await ws.send_json({"type": "transcript", "messages": messages})
+        # transcript back so the client can persist it, and write the
+        # authoritative copy to disk.
+        store.save(cid, messages)
+        await ws.send_json({"type": "transcript", "conversation_id": cid, "messages": messages})
 
     return ws
 
@@ -138,6 +183,10 @@ def build_app(cfg: ChatBackendConfig) -> web.Application:
     app.router.add_get("/", _index)
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/chat", _ws_chat)
+    app.router.add_get("/api/conversations", _list_conversations)
+    app.router.add_post("/api/conversations", _create_conversation)
+    app.router.add_get(r"/api/conversations/{cid}", _get_conversation)
+    app.router.add_delete(r"/api/conversations/{cid}", _delete_conversation)
     return app
 
 
