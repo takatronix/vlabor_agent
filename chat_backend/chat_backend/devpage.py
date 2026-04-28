@@ -54,20 +54,20 @@ DEV_HTML = """<!doctype html>
 
     header {
       display: flex; align-items: center; gap: 12px;
-      padding: 8px 16px;
+      padding: 8px 13px;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
       flex-shrink: 0;
     }
     header h1 { margin: 0; font-size: 14px; font-weight: 600; color: var(--accent); }
-    .status { display: inline-flex; align-items: center; gap: 6px;
+    .status { display: inline-flex; align-items: center; gap: 3px;
               font-size: 12px; color: var(--muted); }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
     .dot.ok { background: #3fb950; }
     .dot.bad { background: #f85149; }
     .grow { flex: 1; }
     header code { font-size: 11px; color: var(--muted);
-                  background: rgba(255,255,255,0.04); padding: 1px 6px; border-radius: 3px; }
+                  background: rgba(255,255,255,0.04); padding: 1px 3px; border-radius: 3px; }
     .icon-btn {
       background: transparent; border: 1px solid var(--border);
       color: var(--muted); padding: 4px 10px; border-radius: 4px;
@@ -82,11 +82,11 @@ DEV_HTML = """<!doctype html>
       flex: 1; min-height: 0;
       display: grid;
       grid-template-columns:
-        var(--col-left, 240px) 6px 1fr 6px var(--col-right, 360px);
+        var(--col-left, 240px) 3px 1fr 3px var(--col-right, 360px);
       width: 100%;
     }
-    main.collapse-left  { grid-template-columns: 0 0 1fr 6px var(--col-right, 360px); }
-    main.collapse-right { grid-template-columns: var(--col-left, 240px) 6px 1fr 0 0; }
+    main.collapse-left  { grid-template-columns: 0 0 1fr 3px var(--col-right, 360px); }
+    main.collapse-right { grid-template-columns: var(--col-left, 240px) 3px 1fr 0 0; }
     main.collapse-left.collapse-right { grid-template-columns: 0 0 1fr 0 0; }
     aside, .right-pane { overflow: hidden; }
 
@@ -110,7 +110,7 @@ DEV_HTML = """<!doctype html>
     aside .new-btn {
       margin: 10px; padding: 8px 12px;
       background: var(--accent); color: #0d1117;
-      border: 0; border-radius: 6px; cursor: pointer;
+      border: 0; border-radius: 3px; cursor: pointer;
       font-weight: 600; font-size: 13px;
     }
     aside .new-btn:hover { filter: brightness(1.15); }
@@ -120,7 +120,7 @@ DEV_HTML = """<!doctype html>
       padding: 0 8px 10px;
     }
     aside .conv-item {
-      padding: 8px 10px; border-radius: 6px;
+      padding: 8px 10px; border-radius: 3px;
       cursor: pointer; user-select: none;
       display: flex; flex-direction: column; gap: 2px;
       position: relative;
@@ -133,10 +133,10 @@ DEV_HTML = """<!doctype html>
     }
     aside .conv-meta { font-size: 10.5px; color: var(--muted); }
     aside .conv-del {
-      position: absolute; right: 6px; top: 6px;
+      position: absolute; right: 3px; top: 3px;
       background: transparent; border: 0; color: var(--muted);
       font-size: 13px; cursor: pointer; opacity: 0; transition: opacity 0.15s;
-      padding: 2px 6px;
+      padding: 2px 3px;
     }
     aside .conv-item:hover .conv-del { opacity: 1; }
     aside .conv-del:hover { color: #f85149; }
@@ -182,23 +182,23 @@ DEV_HTML = """<!doctype html>
 
     .bubble p { margin: 0 0 8px; }
     .bubble p:last-child { margin-bottom: 0; }
-    .bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 6px; line-height: 1.3; }
+    .bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 3px; line-height: 1.3; }
     .bubble h1 { font-size: 18px; }
-    .bubble h2 { font-size: 16px; }
+    .bubble h2 { font-size: 13px; }
     .bubble h3 { font-size: 14px; color: var(--accent); }
-    .bubble ul, .bubble ol { margin: 6px 0; padding-left: 22px; }
+    .bubble ul, .bubble ol { margin: 3px 0; padding-left: 22px; }
     .bubble li { margin: 2px 0; }
     .bubble a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted; }
     .bubble a:hover { border-bottom-style: solid; }
     .bubble code {
-      background: rgba(255,255,255,0.08); padding: 1px 6px;
+      background: rgba(255,255,255,0.08); padding: 1px 3px;
       border-radius: 3px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
       font-size: 12.5px;
     }
     .msg.user .bubble code { background: rgba(0,0,0,0.25); }
     .bubble pre {
       background: rgba(0,0,0,0.4); padding: 10px 12px;
-      border-radius: 6px; overflow-x: auto;
+      border-radius: 3px; overflow-x: auto;
       font-family: ui-monospace, "SF Mono", Menlo, monospace;
       font-size: 12px; line-height: 1.5;
       margin: 8px 0;
@@ -221,7 +221,7 @@ DEV_HTML = """<!doctype html>
     .bubble hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
     .bubble img {
       max-width: 100%; max-height: 320px;
-      border-radius: 6px; display: block; margin: 6px 0;
+      border-radius: 3px; display: block; margin: 3px 0;
       border: 1px solid var(--border);
     }
 
@@ -241,7 +241,7 @@ DEV_HTML = """<!doctype html>
     }
     .tool summary { cursor: pointer; outline: none; user-select: none; }
     .tool summary::-webkit-details-marker { color: var(--muted); }
-    .tool .body { margin-top: 6px; padding-top: 6px;
+    .tool .body { margin-top: 3px; padding-top: 3px;
                   border-top: 1px dashed rgba(255,255,255,0.1); }
     .tool pre {
       margin: 0; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
@@ -269,7 +269,7 @@ DEV_HTML = """<!doctype html>
       flex: 1; resize: none;
       background: transparent; color: var(--text);
       border: 0; outline: none;
-      font: inherit; padding: 6px 8px;
+      font: inherit; padding: 3px 8px;
       max-height: 200px; min-height: 38px;
       line-height: 1.5;
     }
@@ -287,9 +287,9 @@ DEV_HTML = """<!doctype html>
 
     .empty {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      flex: 1; gap: 6px; color: var(--muted);
+      flex: 1; gap: 3px; color: var(--muted);
     }
-    .empty .big { font-size: 16px; color: var(--text); }
+    .empty .big { font-size: 13px; color: var(--text); }
     .empty .small { font-size: 12px; }
 
     /* --- Right pane (Live View + BT) --- */
@@ -325,8 +325,8 @@ DEV_HTML = """<!doctype html>
     }
     .pane-empty {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      height: 100%; gap: 6px; color: var(--muted); font-size: 12px;
-      padding: 16px; text-align: center;
+      height: 100%; gap: 3px; color: var(--muted); font-size: 12px;
+      padding: 13px; text-align: center;
     }
     .bt-canvas-wrap {
       position: absolute; inset: 0;
