@@ -42,7 +42,7 @@ DEV_HTML = """<!doctype html>
   </div>
   <div id="log"></div>
   <form id="form">
-    <textarea id="input" rows="2" placeholder="Ask the agent something — e.g. 'show me the arm joint angles'"></textarea>
+    <textarea id="input" rows="2" placeholder="Ask the agent something — Enter to send / Shift+Enter for newline"></textarea>
     <button id="send" type="submit">Send</button>
   </form>
 
@@ -98,8 +98,7 @@ function connect() {
   });
 }
 
-form.addEventListener('submit', (e) => {
-  e.preventDefault();
+function submit() {
   const text = (input.value || '').trim();
   if (!text || inflight || !ws || ws.readyState !== WebSocket.OPEN) return;
   inflight = true;
@@ -107,6 +106,19 @@ form.addEventListener('submit', (e) => {
   append('user', `> ${text}`);
   input.value = '';
   ws.send(JSON.stringify({ type: 'user_message', text, history }));
+}
+
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  submit();
+});
+
+// Enter sends, Shift+Enter inserts a newline. IME composition is
+// honoured (don't fire while a Japanese candidate window is open).
+input.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  submit();
 });
 
 connect();
