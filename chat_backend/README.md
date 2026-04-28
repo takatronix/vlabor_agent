@@ -14,9 +14,21 @@ Anthropic API + MCP tool-use loop for `vlabor_agent`.
 
 ## Run
 
+Easiest path — uses the bundled `run` script (creates `.venv`,
+installs deps, starts on port 8887):
+
 ```bash
 cd chat_backend
-uv pip install -e .   # or: pip install -e .
+./run
+```
+
+Manual path:
+
+```bash
+cd chat_backend
+uv venv --python 3.11 .venv
+source .venv/bin/activate
+uv pip install -e .
 VLABOR_AGENT_PORT=8887 vlabor-agent-chat
 ```
 

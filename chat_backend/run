@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Spin up the chat_backend in a per-package .venv.
+#
+# Idempotent: re-run after pulling — uv's pip is fast enough that
+# the install step is effectively a no-op when nothing changed.
+#
+# Override VLABOR_AGENT_PORT to pick a port; defaults to 8887 so it
+# doesn't collide with vlabor_dashboard on 8888.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${ROOT_DIR}"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "[run] uv not found. install uv first: https://github.com/astral-sh/uv" >&2
+  exit 1
+fi
+
+if [[ ! -d ".venv" ]]; then
+  echo "[run] creating .venv (python>=3.11)"
+  uv venv --python 3.11 .venv
+fi
+
+# shellcheck disable=SC1091
+source .venv/bin/activate
+
+# Install / upgrade in-place. Editable install means code edits land
+# without a reinstall.
+uv pip install -e . --quiet
+
+export VLABOR_AGENT_PORT="${VLABOR_AGENT_PORT:-8887}"
+echo "[run] starting on port ${VLABOR_AGENT_PORT}"
+exec vlabor-agent-chat
