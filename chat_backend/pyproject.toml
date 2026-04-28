@@ -1,0 +1,31 @@
+[project]
+name = "vlabor-agent-chat-backend"
+version = "0.0.1"
+description = "Anthropic API + MCP tool-use loop for vlabor_agent"
+requires-python = ">=3.11"
+dependencies = [
+  "anthropic>=0.40.0",
+  "aiohttp>=3.10.0",
+  "mcp>=1.0.0",
+  "pydantic>=2.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.24.0",
+  "ruff>=0.6.0",
+]
+
+[project.scripts]
+vlabor-agent-chat = "chat_backend.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["chat_backend*"]
+
+[tool.ruff]
+line-length = 100
