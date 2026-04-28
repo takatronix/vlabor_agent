@@ -76,17 +76,29 @@ DEV_HTML = """<!doctype html>
     .icon-btn:hover { color: var(--accent); border-color: var(--accent); }
 
     /* 3-column layout fills the viewport. Side panels are resizable
-       via CSS variables; toggle buttons collapse them. */
+       via CSS variables (set by the drag handle JS) and collapsible
+       via the header toggle buttons. */
     main {
       flex: 1; min-height: 0;
       display: grid;
-      grid-template-columns: var(--col-left, 240px) 1fr var(--col-right, 360px);
+      grid-template-columns:
+        var(--col-left, 240px) 6px 1fr 6px var(--col-right, 360px);
       width: 100%;
     }
-    main.collapse-left  { grid-template-columns: 0 1fr var(--col-right, 360px); }
-    main.collapse-right { grid-template-columns: var(--col-left, 240px) 1fr 0; }
-    main.collapse-left.collapse-right { grid-template-columns: 0 1fr 0; }
+    main.collapse-left  { grid-template-columns: 0 0 1fr 6px var(--col-right, 360px); }
+    main.collapse-right { grid-template-columns: var(--col-left, 240px) 6px 1fr 0 0; }
+    main.collapse-left.collapse-right { grid-template-columns: 0 0 1fr 0 0; }
     aside, .right-pane { overflow: hidden; }
+
+    /* Drag handles — thin vertical bars sitting in the grid gaps. */
+    .resizer {
+      cursor: col-resize; user-select: none;
+      background: var(--border-soft);
+      transition: background 0.15s;
+      position: relative;
+    }
+    .resizer:hover, .resizer.dragging { background: var(--accent); }
+    .resizer.hidden { background: transparent; cursor: default; pointer-events: none; }
 
     /* --- Left sidebar (history) --- */
     aside {
@@ -347,6 +359,7 @@ DEV_HTML = """<!doctype html>
         <div class="conv-empty">no conversations yet</div>
       </div>
     </aside>
+    <div class="resizer" id="resizerLeft" data-edge="left" title="Drag to resize history pane"></div>
 
     <section class="chat-panel">
       <div id="log">
@@ -361,6 +374,7 @@ DEV_HTML = """<!doctype html>
         <button id="send" class="send-btn" type="button">Send</button>
       </div>
     </section>
+    <div class="resizer" id="resizerRight" data-edge="right" title="Drag to resize Live View / BT pane"></div>
 
     <div class="right-pane">
       <div class="pane-card live">
@@ -721,6 +735,79 @@ function restoreLayoutPrefs() {
 }
 toggleLeft.addEventListener('click', () => { layout.classList.toggle('collapse-left'); persistLayoutPrefs(); });
 toggleRight.addEventListener('click', () => { layout.classList.toggle('collapse-right'); persistLayoutPrefs(); });
+
+// --- drag to resize side panels --------------------------------------------
+
+const RESIZE_KEY = 'vlabor_agent.col_widths';
+const MIN_LEFT = 160, MAX_LEFT = 480;
+const MIN_RIGHT = 240, MAX_RIGHT = 720;
+
+function applyColWidths(left, right) {
+  if (typeof left === 'number') {
+    layout.style.setProperty('--col-left', `${Math.max(MIN_LEFT, Math.min(MAX_LEFT, left))}px`);
+  }
+  if (typeof right === 'number') {
+    layout.style.setProperty('--col-right', `${Math.max(MIN_RIGHT, Math.min(MAX_RIGHT, right))}px`);
+  }
+}
+function persistColWidths() {
+  try {
+    const left = parseInt(getComputedStyle(layout).getPropertyValue('--col-left'), 10) || 240;
+    const right = parseInt(getComputedStyle(layout).getPropertyValue('--col-right'), 10) || 360;
+    localStorage.setItem(RESIZE_KEY, JSON.stringify({ left, right }));
+  } catch (_) {}
+}
+function restoreColWidths() {
+  try {
+    const raw = localStorage.getItem(RESIZE_KEY);
+    if (!raw) return;
+    const p = JSON.parse(raw);
+    applyColWidths(p.left, p.right);
+  } catch (_) {}
+}
+restoreColWidths();
+
+function startDrag(e, edge) {
+  if (e.button !== 0) return;
+  // The resizer is a no-op when its column is collapsed.
+  if (edge === 'left' && layout.classList.contains('collapse-left')) return;
+  if (edge === 'right' && layout.classList.contains('collapse-right')) return;
+  e.preventDefault();
+  const startX = e.clientX;
+  const css = getComputedStyle(layout);
+  const startLeft = parseInt(css.getPropertyValue('--col-left'), 10) || 240;
+  const startRight = parseInt(css.getPropertyValue('--col-right'), 10) || 360;
+  const handle = (edge === 'left' ? document.getElementById('resizerLeft')
+                                  : document.getElementById('resizerRight'));
+  handle.classList.add('dragging');
+  document.body.style.cursor = 'col-resize';
+
+  function onMove(ev) {
+    const dx = ev.clientX - startX;
+    if (edge === 'left') applyColWidths(startLeft + dx, undefined);
+    else applyColWidths(undefined, startRight - dx);
+  }
+  function onUp() {
+    handle.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    persistColWidths();
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+document.getElementById('resizerLeft').addEventListener('mousedown', (e) => startDrag(e, 'left'));
+document.getElementById('resizerRight').addEventListener('mousedown', (e) => startDrag(e, 'right'));
+
+// Double-click on a resizer resets that side to its default width.
+document.getElementById('resizerLeft').addEventListener('dblclick', () => {
+  applyColWidths(240, undefined); persistColWidths();
+});
+document.getElementById('resizerRight').addEventListener('dblclick', () => {
+  applyColWidths(undefined, 360); persistColWidths();
+});
+
 restoreLayoutPrefs();
 
 resetBtn.addEventListener('click', () => {
