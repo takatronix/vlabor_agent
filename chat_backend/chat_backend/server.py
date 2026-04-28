@@ -29,6 +29,7 @@ from anthropic import AsyncAnthropic
 
 from .chat_loop import run_chat
 from .config import ChatBackendConfig, read_api_key
+from .devpage import DEV_HTML
 from .mcp_pool import McpPool
 
 log = logging.getLogger(__name__)
@@ -46,6 +47,11 @@ async def _on_cleanup(app: web.Application) -> None:
     pool: McpPool | None = app.get("mcp_pool")
     if pool is not None:
         await pool.aclose()
+
+
+async def _index(request: web.Request) -> web.Response:
+    # Phase 0 dev page — replace with web_ui once that ships.
+    return web.Response(text=DEV_HTML, content_type="text/html")
 
 
 async def _healthz(request: web.Request) -> web.Response:
@@ -120,6 +126,7 @@ def build_app(cfg: ChatBackendConfig) -> web.Application:
     app["cfg"] = cfg
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
+    app.router.add_get("/", _index)
     app.router.add_get("/healthz", _healthz)
     app.router.add_get("/chat", _ws_chat)
     return app
