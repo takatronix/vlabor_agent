@@ -24,7 +24,7 @@ import json
 import logging
 import sys
 
-from aiohttp import WSCloseCode, WSMsgType, web
+from aiohttp import WSMsgType, web
 from anthropic import AsyncAnthropic
 
 from .chat_loop import run_chat
@@ -72,15 +72,10 @@ async def _ws_chat(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
 
-    api_key = read_api_key(cfg.api_key_path)
-    if not api_key:
-        await ws.send_json(
-            {"type": "error", "message": f"no API key at {cfg.api_key_path}"}
-        )
-        await ws.close(code=WSCloseCode.POLICY_VIOLATION, message=b"no api key")
-        return ws
-
-    client = AsyncAnthropic(api_key=api_key)
+    # Don't close the connection on missing API key — that triggers a
+    # reconnect storm in any auto-reconnecting client. Just keep the
+    # socket open and reject individual messages until the operator
+    # drops a key in place.
 
     async for msg in ws:
         if msg.type != WSMsgType.TEXT:
@@ -96,6 +91,19 @@ async def _ws_chat(request: web.Request) -> web.WebSocketResponse:
             )
             continue
 
+        # Re-read the key on every turn so a fresh save shows up
+        # without dropping the WS.
+        api_key = read_api_key(cfg.api_key_path)
+        if not api_key:
+            await ws.send_json(
+                {
+                    "type": "error",
+                    "message": f"no API key at {cfg.api_key_path} — save one and try again",
+                }
+            )
+            await ws.send_json({"type": "done", "stop_reason": "no_api_key"})
+            continue
+
         text = (payload.get("text") or "").strip()
         if not text:
             await ws.send_json({"type": "error", "message": "empty text"})
@@ -107,6 +115,7 @@ async def _ws_chat(request: web.Request) -> web.WebSocketResponse:
         messages = list(history)
         messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
 
+        client = AsyncAnthropic(api_key=api_key)
         async for event in run_chat(
             client=client,
             model=cfg.anthropic_model,
