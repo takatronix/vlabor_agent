@@ -25,12 +25,23 @@ drive any robot exposing an MCP surface (so101, aspa-navigation, …).
 ```
 vlabor_agent/
 ├── chat_backend/       Python service: Anthropic API + MCP tool-use loop
-├── bt_runtime/         ROS2 Python node: behavior tree executor (py_trees_ros)
+├── bt_runtime/         Python service: behavior tree executor (py_trees)
 ├── web_ui/             Web frontend: chat panel + behavior tree canvas
 ├── examples/           Example task trees / prompts per robot
-├── docker/             Docker compose for the chat-backend + web-ui
+├── docker/             Docker compose for the chat-backend + bt-runtime + web-ui
 └── docs/design/        Architecture and roadmap
 ```
+
+## No ROS2 dependency
+
+vlabor_agent **does not depend on ROS2**. It talks to robots only
+through MCP servers (today: `vlabor-obs`; tomorrow: whatever else
+each robot project chooses to expose). Robot-specific ROS internals
+stay in those projects; the agent stays portable.
+
+That keeps the Docker images small (slim Python / Node, no
+`ros:humble-desktop` base) and makes the same agent runtime usable
+by non-ROS robots later.
 
 ## License
 

@@ -18,15 +18,14 @@ vlabor_dashboard とは別プロジェクトとして立てる。「vlabor / asp
 ## 想定リポジトリ構成
 
 ```
-agent_orchestrator/
+vlabor_agent/
 ├── README.md
+├── CLAUDE.md
 ├── docs/design/         (this doc + roadmap)
-├── packages/
-│   ├── chat-backend/    (Anthropic API + MCP tool-use loop)
-│   ├── bt-runtime/      (BT executor、ROS2 ノード)
-│   ├── bt-bridge/       (LLM JSON ↔ BehaviorTree.CPP 双方向)
-│   └── web-ui/          (chat + BT canvas + 操作ガイド)
-├── docker/
+├── chat_backend/        (Python: Anthropic API + MCP tool-use loop)
+├── bt_runtime/          (Python: BT executor — py_trees, NOT py_trees_ros)
+├── web_ui/              (TypeScript: chat + BT canvas + 操作ガイド)
+├── docker/              (python:3.12-slim / node:20-slim ベース)
 └── examples/
     ├── piper_pickplace/ (vlabor 連携サンプル)
     └── aspa_navigate/   (将来)
@@ -34,6 +33,14 @@ agent_orchestrator/
 
 vlabor との接点は **MCP server (vlabor-obs / 将来 vlabor-act 等)** だけ。
 agent は MCP tool を叩く。それ以外 vlabor 内部は知らない。
+
+## ROS2 依存を持たない判断
+
+- bt_runtime は `py_trees`（**`py_trees_ros` ではない**）
+- BT action = **MCP tool 呼び出しのみ**。ROS topic / service を直接叩かない
+- Docker base は `python:3.12-slim` / `node:20-slim`、`ros:*` ベース不使用
+- 機種非依存設計の核。ROS native 機能 (TF / param / rosout) が欲しい場合は
+  vlabor 側 MCP に「ドメインとして意味のある抽象」として足す方針
 
 ## アーキテクチャ全体像
 
@@ -133,20 +140,67 @@ Phase 3 — 拡張:
 - セッション保存 / 再生
 - Groot1 export
 
+## 長時間タスクの扱い
+
+ロボットの pick-place は数十秒〜数分、片付け mission は十数分かかる。
+chat-backend / bt-runtime / web-ui どこが落ちても tree が消えないよう
+段階的に堅牢化する。
+
+### MVP (Phase 0〜1)
+
+- bt_runtime は **単一プロセス・in-memory**
+- Tree state を **300ms 周期で `~/.vlabor/agent/tasks/<task_id>.json` に snapshot**
+  (RUNNING ノード・完了済 child・最後の tool_result など)
+- web-ui の WebSocket 切断 ≠ task 中断。clientは re-connect で snapshot から復元
+- bt_runtime 自体が落ちた場合、再起動時に「未完了の task が N 個ある」と
+  list 表示 → operator に **手動で resume / abandon** 選ばせる (auto-resume は安全上やらない)
+
+### 長時間 MCP tool (例: MoveIt plan, 推論実行)
+
+MCP のツール呼び出しはデフォルトで同期。長いと WS タイムアウトに当たるので、
+**「kick off + poll」パターン**を BT level で標準化する:
+
+```
+sequence:
+  - tool_call: vlabor_act/start_task   → returns task_id
+  - poll_until: vlabor_act/get_task_status(task_id) status=done
+  - tool_call: vlabor_act/get_task_result(task_id)
+```
+
+`poll_until` は専用の BT decorator として実装、tick ごとに status を見る。
+chat_backend は MCP server に kick-off だけ送って即 return、poll は
+bt_runtime が回す → web-ui には status 進捗をストリーム。
+
+### Phase 2+ で検討
+
+- snapshot を SQLite に変更 (履歴保管 + replay 用)
+- 1 task = 1 subprocess に分離 (crash 隔離) — ただし Docker / process 数が膨らむので様子見
+- 外部 task queue (Celery / Dramatiq) 導入: multi-robot / 複数 operator 同時運用が必要になったら
+
+### 中断・キャンセル
+
+- web-ui の "Stop" → bt_runtime に `cancel(task_id)` → 走行中の MCP tool に
+  cancel hint を伝播 + 後続 tick で running ノードを `INTERRUPTED` 状態に
+- Cancel hint は MCP server 側で **意味のある単位** で実装する責務 (vlabor 側で
+  軌道生成中なら破棄、軌道追従中なら「停止コマンドを送る」など)
+- agent はそのセマンティクスに踏み込まない
+
 ## 開いてる設計問題
 
 1. **BT 標準準拠 vs 自前**: 第一は自前 JSON、後で Groot 形式への export を提供。vs 最初から BT.CPP XML に振り切る。
 2. **LLM output schema**: tool_use → BT への変換を chat-backend / bt-runtime どちら側で?
-3. **長時間タスク**: BT の running をどこで保持? ROS2 service ベースか永続 DB か。
-4. **Multi-robot**: 同じ runtime が複数ロボ同時 orchestrate できるべきか? (将来)
-5. **オフライン LLM**: claude API 必須にすべきか、Ollama / LMStudio もサポートか?
+3. **Multi-robot**: 同じ runtime が複数ロボ同時 orchestrate できるべきか? (将来)
+4. **オフライン LLM**: claude API 必須にすべきか、Ollama / LMStudio もサポートか?
+5. **snapshot の SQLite 化タイミング**: file ベースで運用始めて、replay / 履歴 UI が
+   要求として固まってから switch。
 
 ## 次回 cold-start 時にやること
 
-1. リポジトリ作成 (たぶん `~/ros2_ws/src/agent_orchestrator` 単独 git、後日 push)
-2. Phase 0 実装 (chat-backend Hello World)
-3. vlabor-obs を MCP として呼べることを確認
-4. BT の最小 schema 固める (JSON schema 書き出す)
+1. ✓ リポジトリ作成 (`~/ros2_ws/src/vlabor_agent` + GitHub `takatronix/vlabor_agent`)
+2. Phase 0 実装 (chat_backend Hello World — Anthropic API でテキスト往復のみ)
+3. vlabor-obs を MCP として呼べることを確認 (chat の tool_use ループ)
+4. BT の最小 schema 固める (JSON schema 書き出す + サンプル tree 1 つ)
+5. snapshot ファイルパスと format を docs に確定
 
 参考メモ:
 - 関連 vlabor MCP 設計: profile yaml の `dashboard.mcp.examples` (`vlabor-obs`)

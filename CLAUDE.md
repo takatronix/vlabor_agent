@@ -17,21 +17,32 @@ expect this doc to change as the architecture solidifies.
 
 ## サブパッケージの境界
 
-| ディレクトリ | 言語 | ROS2? | 役割 |
-|-------------|------|-------|------|
-| `chat_backend/` | Python (FastAPI / aiohttp 想定) | No | Anthropic API + MCP tool-use loop |
-| `bt_runtime/` | Python (py_trees_ros) | Yes | behavior tree executor |
-| `web_ui/` | TypeScript (vite + React or Svelte) | No | chat panel + BT canvas |
-| `examples/` | yaml / json | No | task tree / prompt サンプル |
-| `docker/` | compose / Dockerfile | No | chat_backend + web_ui のコンテナ |
+| ディレクトリ | 言語 | 役割 |
+|-------------|------|------|
+| `chat_backend/` | Python (FastAPI / aiohttp) | Anthropic API + MCP tool-use loop |
+| `bt_runtime/` | Python (py_trees) | behavior tree executor |
+| `web_ui/` | TypeScript (vite + React or Svelte) | chat panel + BT canvas |
+| `examples/` | yaml / json | task tree / prompt サンプル |
+| `docker/` | compose / Dockerfile | chat_backend + bt_runtime + web_ui コンテナ |
 
-`chat_backend` ↔ `web_ui` は WebSocket、`chat_backend` ↔ `bt_runtime`
-は ROS2 service / topic か WebSocket。ROS2 にどこまで載せるかは
-`docs/design/overview.md` の "Open questions" を参照。
+`chat_backend` ↔ `web_ui` ↔ `bt_runtime` は WebSocket / HTTP のみ。
+プロセス間で ROS2 は使わない (下記参照)。
+
+## ROS2 依存なし
+
+**vlabor_agent は ROS2 に依存しない**。ロボットとの通信は MCP
+サーバ経由のみ (今は `vlabor-obs` 1 個、将来は各ロボ案件が自分で
+提供する MCP に対応)。
+
+- `bt_runtime` は `py_trees`（**`py_trees_ros` ではない**）
+- Docker base は `python:3.12-slim` / `node:20-slim`、`ros:*` ベースは使わない
+- ROS2 native 機能 (TF / rosout / param) を agent から直接欲しくなったら、
+  それは vlabor 側 (or 他ロボ側) の MCP に **そのドメインで意味のある
+  抽象化** として足してもらう。agent 側は ROS の細部を知らない方針。
 
 ## vlabor 連携
 
-- vlabor の中身は **直接 import しない**。
+- vlabor の中身は **直接 import しない / topic 直接購読しない**。
 - vlabor が公開する **MCP server (vlabor-obs / 将来 vlabor-act)** を
   通じて操作する。これにより agent は機種非依存で書ける。
 
