@@ -3,6 +3,10 @@
 Phase 0 dev surface — replaced once the real ``web_ui`` ships. Kept
 deliberately single-file so the chat backend stays useful even
 without a separate frontend build step.
+
+Markdown rendering uses marked.js from a CDN (GFM tables / lists /
+code fences) — same de-facto choice as Claude / ChatGPT / Cursor.
+Images returned by MCP tool_result blocks are rendered inline.
 """
 
 from __future__ import annotations
@@ -13,6 +17,8 @@ DEV_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>vlabor_agent</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   <style>
     :root {
       --bg: #0d1117;
@@ -23,38 +29,39 @@ DEV_HTML = """<!doctype html>
       --muted: #8b949e;
       --accent: #58a6ff;
       --user: #1f6feb;
-      --assistant: #2a2f3a;
-      --tool: #3f2f1a;
+      --assistant: #21262d;
+      --tool: #2a2417;
       --tool-border: #6c4f1f;
-      --error: #862a2a;
-      --error-border: #a94747;
-      --success: #1a3a25;
+      --tool-ok: #1a3a25;
+      --tool-ok-border: #2ea043;
+      --error: #4a1d1d;
+      --error-border: #f85149;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
-                   "Noto Sans JP", system-ui, sans-serif;
-      font-size: 14px;
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                   "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+      font-size: 14px; line-height: 1.55;
       display: flex; flex-direction: column;
     }
+
     header {
       display: flex; align-items: center; gap: 12px;
-      padding: 10px 16px;
+      padding: 8px 16px;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
     }
     header h1 { margin: 0; font-size: 14px; font-weight: 600; color: var(--accent); }
-    .status {
-      display: inline-flex; align-items: center; gap: 6px;
-      font-size: 12px; color: var(--muted);
-    }
+    .status { display: inline-flex; align-items: center; gap: 6px;
+              font-size: 12px; color: var(--muted); }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
     .dot.ok { background: #3fb950; }
     .dot.bad { background: #f85149; }
     .grow { flex: 1; }
+    header code { font-size: 11px; color: var(--muted);
+                  background: rgba(255,255,255,0.04); padding: 1px 6px; border-radius: 3px; }
     .icon-btn {
       background: transparent; border: 1px solid var(--border);
       color: var(--muted); padding: 4px 10px; border-radius: 4px;
@@ -66,84 +73,129 @@ DEV_HTML = """<!doctype html>
       flex: 1; min-height: 0;
       display: flex; flex-direction: column;
       max-width: 880px; width: 100%; margin: 0 auto;
-      padding: 16px;
-      gap: 12px;
+      padding: 14px 16px 10px;
+      gap: 10px;
     }
     #log {
       flex: 1; overflow-y: auto;
-      display: flex; flex-direction: column; gap: 12px;
-      padding-right: 4px;
+      display: flex; flex-direction: column; gap: 14px;
+      padding: 4px 4px 4px 0;
     }
+    #log::-webkit-scrollbar { width: 8px; }
+    #log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
     .msg { display: flex; gap: 10px; max-width: 100%; }
     .msg.user { justify-content: flex-end; }
     .avatar {
-      width: 28px; height: 28px; border-radius: 50%;
-      flex-shrink: 0;
+      width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
       display: flex; align-items: center; justify-content: center;
-      font-size: 13px; font-weight: 600;
+      font-size: 12px; font-weight: 700;
     }
-    .avatar.assistant { background: rgba(88,166,255,0.15); color: var(--accent); }
+    .avatar.assistant { background: rgba(88,166,255,0.18); color: var(--accent); }
     .avatar.user { background: rgba(63,185,80,0.18); color: #3fb950; }
 
     .bubble {
-      max-width: 75%;
-      padding: 10px 14px; border-radius: 10px;
-      line-height: 1.55;
+      max-width: 78%;
+      padding: 10px 14px; border-radius: 12px;
       word-wrap: break-word; overflow-wrap: anywhere;
-      white-space: pre-wrap;
     }
-    .msg.assistant .bubble { background: var(--assistant); }
+    .msg.assistant .bubble { background: var(--assistant); border-bottom-left-radius: 3px; }
     .msg.user .bubble {
       background: var(--user); color: #fff;
-      border-bottom-right-radius: 2px;
+      border-bottom-right-radius: 3px;
     }
-    .msg.assistant .bubble { border-bottom-left-radius: 2px; }
+
+    /* Markdown content inside bubbles. */
+    .bubble p { margin: 0 0 8px; }
+    .bubble p:last-child { margin-bottom: 0; }
+    .bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 6px; line-height: 1.3; }
+    .bubble h1 { font-size: 18px; }
+    .bubble h2 { font-size: 16px; }
+    .bubble h3 { font-size: 14px; color: var(--accent); }
+    .bubble ul, .bubble ol { margin: 6px 0; padding-left: 22px; }
+    .bubble li { margin: 2px 0; }
+    .bubble a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted; }
+    .bubble a:hover { border-bottom-style: solid; }
     .bubble code {
       background: rgba(255,255,255,0.08); padding: 1px 6px;
-      border-radius: 3px; font-family: ui-monospace, monospace; font-size: 12.5px;
+      border-radius: 3px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 12.5px;
     }
+    .msg.user .bubble code { background: rgba(0,0,0,0.25); }
     .bubble pre {
-      background: rgba(0,0,0,0.35); padding: 10px 12px;
+      background: rgba(0,0,0,0.4); padding: 10px 12px;
       border-radius: 6px; overflow-x: auto;
-      font-family: ui-monospace, monospace; font-size: 12px;
-      margin: 6px 0;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 12px; line-height: 1.5;
+      margin: 8px 0;
     }
-    .bubble pre code { background: transparent; padding: 0; }
+    .bubble pre code { background: transparent; padding: 0; font-size: 12px; }
+    .bubble blockquote {
+      border-left: 3px solid var(--border); padding: 0 12px;
+      color: var(--muted); margin: 8px 0;
+    }
+    .bubble table {
+      border-collapse: collapse; margin: 8px 0;
+      font-size: 13px; width: 100%;
+    }
+    .bubble th, .bubble td {
+      border: 1px solid var(--border); padding: 5px 10px;
+      text-align: left;
+    }
+    .bubble th { background: rgba(255,255,255,0.05); font-weight: 600; }
+    .bubble tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+    .bubble hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+    .bubble img {
+      max-width: 100%; max-height: 320px;
+      border-radius: 6px; display: block; margin: 6px 0;
+      border: 1px solid var(--border);
+    }
 
     /* Tool calls collapse the noisy detail under a one-line summary. */
     .tool {
       align-self: flex-start;
       background: var(--tool); border: 1px solid var(--tool-border);
       border-radius: 8px; padding: 8px 12px;
-      max-width: 75%; margin-left: 38px;
-      font-family: ui-monospace, monospace; font-size: 12.5px;
+      max-width: 78%; margin-left: 38px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px;
       color: #ffd6a0;
     }
-    .tool.error { background: var(--error); border-color: var(--error-border); color: #ffd1d1; }
-    .tool.success { color: #c4e8d2; }
+    .tool[data-state="success"] {
+      background: var(--tool-ok); border-color: var(--tool-ok-border); color: #c4e8d2;
+    }
+    .tool[data-state="error"] {
+      background: var(--error); border-color: var(--error-border); color: #ffd1d1;
+    }
     .tool summary { cursor: pointer; outline: none; user-select: none; }
     .tool summary::-webkit-details-marker { color: var(--muted); }
-    .tool .body { margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255,255,255,0.1); }
+    .tool .body {
+      margin-top: 6px; padding-top: 6px;
+      border-top: 1px dashed rgba(255,255,255,0.1);
+    }
     .tool pre {
       margin: 0; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
-      font-size: 11.5px; color: #ffe9c2;
+      font-size: 11.5px;
     }
-    .tool.error pre { color: #ffd1d1; }
-    .tool.success pre { color: #c4e8d2; }
+    .tool .label { font-size: 10.5px; opacity: 0.6; margin-top: 4px; }
+    .tool img {
+      max-width: 100%; max-height: 280px; border-radius: 4px;
+      display: block; margin: 4px 0;
+    }
 
     .system {
       align-self: center;
       font-size: 11px; color: var(--muted);
-      padding: 4px 10px; background: rgba(255,255,255,0.04);
+      padding: 4px 12px; background: rgba(255,255,255,0.04);
       border-radius: 999px;
     }
 
-    /* Composer */
     .composer {
       display: flex; gap: 8px; align-items: flex-end;
       background: var(--panel); border: 1px solid var(--border);
-      border-radius: 10px; padding: 8px;
+      border-radius: 12px; padding: 8px;
+      transition: border-color 0.15s;
     }
+    .composer:focus-within { border-color: var(--accent); }
     .composer textarea {
       flex: 1; resize: none;
       background: transparent; color: var(--text);
@@ -156,20 +208,17 @@ DEV_HTML = """<!doctype html>
     .send-btn {
       align-self: flex-end;
       background: var(--accent); color: #0d1117;
-      border: 0; border-radius: 6px;
-      padding: 8px 16px; font-weight: 600;
-      cursor: pointer; transition: opacity 0.15s;
-      font-size: 13px;
+      border: 0; border-radius: 8px;
+      padding: 8px 18px; font-weight: 600;
+      cursor: pointer; transition: opacity 0.15s, filter 0.15s;
+      font-size: 13px; line-height: 1;
     }
     .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .send-btn:hover:not(:disabled) { filter: brightness(1.1); }
+    .send-btn:hover:not(:disabled) { filter: brightness(1.15); }
 
-    .hint { font-size: 11px; color: var(--muted); padding: 0 4px; }
-
-    /* Empty state */
     .empty {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      flex: 1; gap: 8px; color: var(--muted);
+      flex: 1; gap: 6px; color: var(--muted);
     }
     .empty .big { font-size: 16px; color: var(--text); }
     .empty .small { font-size: 12px; }
@@ -183,13 +232,14 @@ DEV_HTML = """<!doctype html>
       <span id="wsLabel">connecting</span>
     </span>
     <span class="grow"></span>
+    <code id="serverHost">…</code>
     <button class="icon-btn" id="resetBtn" title="Clear chat (also drops history)">↺ Reset</button>
   </header>
   <main>
     <div id="log">
       <div class="empty" id="emptyState">
         <div class="big">Ask the agent anything</div>
-        <div class="small">Tools available are pulled from the configured MCP servers.</div>
+        <div class="small">Tools come from the configured MCP servers. Markdown, tables, and images supported.</div>
       </div>
     </div>
     <div class="composer">
@@ -197,7 +247,6 @@ DEV_HTML = """<!doctype html>
                 placeholder="Type a message — Enter to send, Shift+Enter for newline"></textarea>
       <button id="send" class="send-btn" type="button">Send</button>
     </div>
-    <div class="hint">Connected to <code id="serverHost">…</code> · model picked by backend</div>
   </main>
 
 <script>
@@ -210,26 +259,25 @@ const wsLabel = document.getElementById('wsLabel');
 const resetBtn = document.getElementById('resetBtn');
 document.getElementById('serverHost').textContent = location.host;
 
+// marked.js — GFM on so tables / lists / fenced code work.
+if (window.marked) {
+  marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
+}
+
 const history = [];
 let ws = null;
 let inflight = false;
 let activeAssistantBubble = null;
 
 function escapeHtml(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Minimal markdown: ``` fences, **bold**, *italic*, `inline`. We keep
-// it small intentionally — the dev page isn't trying to compete with
-// the real web_ui.
-function renderMarkdown(text) {
-  let html = escapeHtml(text);
-  html = html.replace(/```([\\s\\S]*?)```/g, (_m, body) =>
-    `<pre><code>${body.replace(/^\\n/, '')}</code></pre>`);
-  html = html.replace(/`([^`\\n]+?)`/g, (_m, body) => `<code>${body}</code>`);
-  html = html.replace(/\\*\\*([^*\\n]+?)\\*\\*/g, '<strong>$1</strong>');
-  html = html.replace(/\\*([^*\\n]+?)\\*/g, '<em>$1</em>');
-  return html;
+function md(text) {
+  if (!window.marked) return escapeHtml(text);
+  const raw = marked.parse(String(text || ''));
+  return window.DOMPurify ? DOMPurify.sanitize(raw) : raw;
 }
 
 function clearEmpty() {
@@ -240,9 +288,7 @@ function addUser(text) {
   clearEmpty();
   const wrap = document.createElement('div');
   wrap.className = 'msg user';
-  wrap.innerHTML = `
-    <div class="bubble">${escapeHtml(text)}</div>
-    <div class="avatar user">U</div>`;
+  wrap.innerHTML = `<div class="bubble">${md(text)}</div><div class="avatar user">U</div>`;
   log.appendChild(wrap);
   log.scrollTop = log.scrollHeight;
 }
@@ -252,9 +298,7 @@ function ensureAssistantBubble() {
   clearEmpty();
   const wrap = document.createElement('div');
   wrap.className = 'msg assistant';
-  wrap.innerHTML = `
-    <div class="avatar assistant">vA</div>
-    <div class="bubble"></div>`;
+  wrap.innerHTML = `<div class="avatar assistant">vA</div><div class="bubble"></div>`;
   log.appendChild(wrap);
   activeAssistantBubble = wrap.querySelector('.bubble');
   log.scrollTop = log.scrollHeight;
@@ -263,57 +307,75 @@ function ensureAssistantBubble() {
 
 function appendAssistantText(text) {
   const bubble = ensureAssistantBubble();
-  // Keep raw text in a data attribute so we can re-render the whole
-  // turn through markdown when the bubble grows.
+  // Cumulate raw text + re-render through markdown each time so partial
+  // streams (incomplete fences, half-tables) still produce something
+  // sensible while the API streams tokens.
   bubble.dataset.raw = (bubble.dataset.raw || '') + text;
-  bubble.innerHTML = renderMarkdown(bubble.dataset.raw);
+  bubble.innerHTML = md(bubble.dataset.raw);
   log.scrollTop = log.scrollHeight;
 }
 
 function addToolCall(name, input, id) {
   clearEmpty();
+  activeAssistantBubble = null;
   const tool = document.createElement('details');
   tool.className = 'tool';
+  tool.dataset.state = 'pending';
   tool.id = `tool-${id}`;
   tool.open = false;
-  const argText = (() => {
-    try { return JSON.stringify(input, null, 2); } catch (_) { return String(input); }
-  })();
+  let argText = '';
+  try { argText = JSON.stringify(input || {}, null, 2); } catch (_) { argText = String(input); }
   tool.innerHTML = `
-    <summary>🔧 <strong>${escapeHtml(name)}</strong> <span style="opacity:0.6">running…</span></summary>
-    <div class="body"><pre>${escapeHtml(argText)}</pre></div>`;
+    <summary>🔧 <strong>${escapeHtml(name)}</strong>
+      <span style="opacity:0.6">running…</span></summary>
+    <div class="body">
+      <div class="label">arguments</div>
+      <pre>${escapeHtml(argText)}</pre>
+    </div>`;
   log.appendChild(tool);
   log.scrollTop = log.scrollHeight;
+}
+
+function blocksToHtml(blocks) {
+  if (!Array.isArray(blocks) || !blocks.length) {
+    return '<pre>(no content)</pre>';
+  }
+  const parts = [];
+  for (const b of blocks) {
+    if (b.type === 'text') {
+      parts.push(`<pre>${escapeHtml(b.text || '')}</pre>`);
+    } else if (b.type === 'image') {
+      const src = b.source || {};
+      if (src.type === 'base64' && src.data) {
+        const mime = src.media_type || 'image/png';
+        parts.push(`<img alt="tool result image" src="data:${mime};base64,${src.data}">`);
+      } else {
+        parts.push('<pre>[image — unrenderable source]</pre>');
+      }
+    } else {
+      parts.push(`<pre>${escapeHtml(JSON.stringify(b))}</pre>`);
+    }
+  }
+  return parts.join('');
 }
 
 function finishToolCall(id, name, isError, summary, content) {
   const tool = document.getElementById(`tool-${id}`);
   if (!tool) return;
-  tool.classList.remove('success', 'error');
-  tool.classList.add(isError ? 'error' : 'success');
+  tool.dataset.state = isError ? 'error' : 'success';
   const icon = isError ? '❌' : '✓';
   const summaryText = summary || (isError ? 'failed' : 'ok');
-  // Body: arg JSON (existing) + a result section.
-  const argPre = tool.querySelector('.body pre');
-  const argHtml = argPre ? argPre.outerHTML : '';
-  const resultPre = document.createElement('pre');
-  resultPre.textContent = renderResultBlocks(content);
+  // Preserve the existing arguments pre block.
+  const argBody = tool.querySelector('.body') ? tool.querySelector('.body').innerHTML : '';
   tool.innerHTML = `
     <summary>${icon} <strong>${escapeHtml(name)}</strong>
-      <span style="opacity:0.7"> — ${escapeHtml(summaryText)}</span></summary>
-    <div class="body">${argHtml}<div style="margin-top:6px;font-size:11px;opacity:0.7;">result:</div>${resultPre.outerHTML}</div>`;
+      <span style="opacity:0.75"> — ${escapeHtml(summaryText)}</span></summary>
+    <div class="body">
+      ${argBody}
+      <div class="label">result</div>
+      ${blocksToHtml(content)}
+    </div>`;
   log.scrollTop = log.scrollHeight;
-}
-
-function renderResultBlocks(blocks) {
-  if (!Array.isArray(blocks) || !blocks.length) return '(no content)';
-  const parts = [];
-  for (const b of blocks) {
-    if (b.type === 'text') parts.push(b.text || '');
-    else if (b.type === 'image') parts.push('[image returned]');
-    else parts.push(JSON.stringify(b));
-  }
-  return parts.join('\\n');
 }
 
 function appendSystem(text) {
@@ -338,21 +400,16 @@ function connect() {
   ws.addEventListener('open', () => setWsStatus('open'));
   ws.addEventListener('close', () => {
     setWsStatus('closed');
-    // Backoff so a server-side error doesn't trigger a tight loop.
     setTimeout(connect, 2000);
   });
   ws.addEventListener('error', () => setWsStatus('error'));
   ws.addEventListener('message', (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch (_) { return; }
-    if (m.type === 'assistant_text') {
-      appendAssistantText(m.text);
-    } else if (m.type === 'tool_use_start') {
-      activeAssistantBubble = null;  // next assistant text starts a new bubble
-      addToolCall(m.name, m.input, m.id);
-    } else if (m.type === 'tool_use_result') {
-      finishToolCall(m.id, m.name, m.is_error, m.summary, m.content);
-    } else if (m.type === 'done') {
+    if (m.type === 'assistant_text') appendAssistantText(m.text);
+    else if (m.type === 'tool_use_start') addToolCall(m.name, m.input, m.id);
+    else if (m.type === 'tool_use_result') finishToolCall(m.id, m.name, m.is_error, m.summary, m.content);
+    else if (m.type === 'done') {
       activeAssistantBubble = null;
       inflight = false;
       sendBtn.disabled = false;
@@ -361,11 +418,12 @@ function connect() {
       activeAssistantBubble = null;
       inflight = false;
       sendBtn.disabled = false;
-      const wrap = document.createElement('details');
-      wrap.className = 'tool error';
-      wrap.open = true;
-      wrap.innerHTML = `<summary>❌ <strong>error</strong> — ${escapeHtml(m.message || 'unknown')}</summary>`;
-      log.appendChild(wrap);
+      const err = document.createElement('div');
+      err.className = 'tool';
+      err.dataset.state = 'error';
+      err.innerHTML = `<summary>❌ <strong>error</strong>
+        <span style="opacity:0.75"> — ${escapeHtml(m.message || 'unknown')}</span></summary>`;
+      log.appendChild(err);
       log.scrollTop = log.scrollHeight;
     } else if (m.type === 'transcript') {
       history.length = 0;
