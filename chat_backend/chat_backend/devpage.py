@@ -4,9 +4,12 @@ Phase 0 dev surface — replaced once the real ``web_ui`` ships. Kept
 deliberately single-file so the chat backend stays useful even
 without a separate frontend build step.
 
-Markdown rendering uses marked.js from a CDN (GFM tables / lists /
-code fences) — same de-facto choice as Claude / ChatGPT / Cursor.
-Images returned by MCP tool_result blocks are rendered inline.
+Three-column layout (full viewport):
+  * Left: conversation history sidebar (collapsible)
+  * Centre: chat (assistant + user bubbles, MCP tool cards, markdown,
+    inline images from tool_result blocks)
+  * Right: Live View iframe (vlabor scene_viewer) + Behavior Tree
+    placeholder (filled in Phase 1)
 """
 
 from __future__ import annotations
@@ -23,11 +26,13 @@ DEV_HTML = """<!doctype html>
     :root {
       --bg: #0d1117;
       --panel: #161b22;
-      --panel-soft: #1c232c;
+      --panel-2: #1c232c;
       --border: #30363d;
+      --border-soft: #21262d;
       --text: #e6edf3;
       --muted: #8b949e;
       --accent: #58a6ff;
+      --accent-soft: rgba(88,166,255,0.12);
       --user: #1f6feb;
       --assistant: #21262d;
       --tool: #2a2417;
@@ -52,6 +57,7 @@ DEV_HTML = """<!doctype html>
       padding: 8px 16px;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
+      flex-shrink: 0;
     }
     header h1 { margin: 0; font-size: 14px; font-weight: 600; color: var(--accent); }
     .status { display: inline-flex; align-items: center; gap: 6px;
@@ -69,13 +75,20 @@ DEV_HTML = """<!doctype html>
     }
     .icon-btn:hover { color: var(--accent); border-color: var(--accent); }
 
+    /* 3-column layout fills the viewport. Side panels are resizable
+       via CSS variables; toggle buttons collapse them. */
     main {
       flex: 1; min-height: 0;
       display: grid;
-      grid-template-columns: 240px 1fr;
+      grid-template-columns: var(--col-left, 240px) 1fr var(--col-right, 360px);
       width: 100%;
-      max-width: 1200px; margin: 0 auto;
     }
+    main.collapse-left  { grid-template-columns: 0 1fr var(--col-right, 360px); }
+    main.collapse-right { grid-template-columns: var(--col-left, 240px) 1fr 0; }
+    main.collapse-left.collapse-right { grid-template-columns: 0 1fr 0; }
+    aside, .right-pane { overflow: hidden; }
+
+    /* --- Left sidebar (history) --- */
     aside {
       display: flex; flex-direction: column;
       border-right: 1px solid var(--border);
@@ -101,18 +114,16 @@ DEV_HTML = """<!doctype html>
       position: relative;
     }
     aside .conv-item:hover { background: rgba(255,255,255,0.04); }
-    aside .conv-item.active { background: rgba(88,166,255,0.12); }
+    aside .conv-item.active { background: var(--accent-soft); }
     aside .conv-title {
       font-size: 13px; color: var(--text);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    aside .conv-meta {
-      font-size: 10.5px; color: var(--muted);
-    }
+    aside .conv-meta { font-size: 10.5px; color: var(--muted); }
     aside .conv-del {
       position: absolute; right: 6px; top: 6px;
       background: transparent; border: 0; color: var(--muted);
-      font-size: 14px; cursor: pointer; opacity: 0; transition: opacity 0.15s;
+      font-size: 13px; cursor: pointer; opacity: 0; transition: opacity 0.15s;
       padding: 2px 6px;
     }
     aside .conv-item:hover .conv-del { opacity: 1; }
@@ -121,10 +132,11 @@ DEV_HTML = """<!doctype html>
       padding: 12px; font-size: 12px; color: var(--muted); text-align: center;
     }
 
+    /* --- Centre chat --- */
     .chat-panel {
       display: flex; flex-direction: column;
-      min-height: 0;
-      padding: 14px 16px 10px;
+      min-height: 0; min-width: 0;
+      padding: 14px 18px 12px;
       gap: 10px;
     }
     #log {
@@ -156,7 +168,6 @@ DEV_HTML = """<!doctype html>
       border-bottom-right-radius: 3px;
     }
 
-    /* Markdown content inside bubbles. */
     .bubble p { margin: 0 0 8px; }
     .bubble p:last-child { margin-bottom: 0; }
     .bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 6px; line-height: 1.3; }
@@ -202,7 +213,6 @@ DEV_HTML = """<!doctype html>
       border: 1px solid var(--border);
     }
 
-    /* Tool calls collapse the noisy detail under a one-line summary. */
     .tool {
       align-self: flex-start;
       background: var(--tool); border: 1px solid var(--tool-border);
@@ -219,19 +229,15 @@ DEV_HTML = """<!doctype html>
     }
     .tool summary { cursor: pointer; outline: none; user-select: none; }
     .tool summary::-webkit-details-marker { color: var(--muted); }
-    .tool .body {
-      margin-top: 6px; padding-top: 6px;
-      border-top: 1px dashed rgba(255,255,255,0.1);
-    }
+    .tool .body { margin-top: 6px; padding-top: 6px;
+                  border-top: 1px dashed rgba(255,255,255,0.1); }
     .tool pre {
       margin: 0; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
       font-size: 11.5px;
     }
     .tool .label { font-size: 10.5px; opacity: 0.6; margin-top: 4px; }
-    .tool img {
-      max-width: 100%; max-height: 280px; border-radius: 4px;
-      display: block; margin: 4px 0;
-    }
+    .tool img { max-width: 100%; max-height: 280px; border-radius: 4px;
+                display: block; margin: 4px 0; }
 
     .system {
       align-self: center;
@@ -273,6 +279,52 @@ DEV_HTML = """<!doctype html>
     }
     .empty .big { font-size: 16px; color: var(--text); }
     .empty .small { font-size: 12px; }
+
+    /* --- Right pane (Live View + BT) --- */
+    .right-pane {
+      display: flex; flex-direction: column;
+      border-left: 1px solid var(--border);
+      background: var(--panel);
+      min-height: 0;
+    }
+    .pane-card {
+      display: flex; flex-direction: column;
+      border-bottom: 1px solid var(--border-soft);
+      min-height: 0;
+    }
+    .pane-card:last-child { border-bottom: 0; }
+    .pane-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px;
+      font-size: 12px; font-weight: 600; color: var(--accent);
+      background: var(--panel-2);
+      border-bottom: 1px solid var(--border-soft);
+      flex-shrink: 0;
+    }
+    .pane-header .pane-host { font-weight: normal; color: var(--muted); font-size: 11px; }
+    .pane-header .grow { flex: 1; }
+    .pane-card.live { flex: 1.2; min-height: 200px; }
+    .pane-card.bt   { flex: 1; min-height: 180px; }
+    .pane-body { flex: 1; min-height: 0; position: relative; }
+    .pane-body iframe {
+      width: 100%; height: 100%; border: 0;
+      background: #05080c;
+      display: block;
+    }
+    .pane-empty {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; gap: 6px; color: var(--muted); font-size: 12px;
+      padding: 16px; text-align: center;
+    }
+    .bt-canvas-wrap {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    @media (max-width: 1100px) {
+      main { grid-template-columns: var(--col-left, 220px) 1fr 0 !important; }
+      .right-pane { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -284,15 +336,18 @@ DEV_HTML = """<!doctype html>
     </span>
     <span class="grow"></span>
     <code id="serverHost">…</code>
-    <button class="icon-btn" id="resetBtn" title="Clear chat (also drops history)">↺ Reset</button>
+    <button class="icon-btn" id="toggleLeft" title="Toggle history sidebar">📚</button>
+    <button class="icon-btn" id="toggleRight" title="Toggle Live View / BT pane">🔍</button>
+    <button class="icon-btn" id="resetBtn" title="New chat (current saved)">↺ Reset</button>
   </header>
-  <main>
+  <main id="layout">
     <aside>
       <button class="new-btn" id="newChatBtn" type="button">+ New chat</button>
       <div class="conv-list" id="convList">
         <div class="conv-empty">no conversations yet</div>
       </div>
     </aside>
+
     <section class="chat-panel">
       <div id="log">
         <div class="empty" id="emptyState">
@@ -306,6 +361,35 @@ DEV_HTML = """<!doctype html>
         <button id="send" class="send-btn" type="button">Send</button>
       </div>
     </section>
+
+    <div class="right-pane">
+      <div class="pane-card live">
+        <div class="pane-header">
+          Live View
+          <span class="pane-host" id="liveHost">—</span>
+          <span class="grow"></span>
+          <button class="icon-btn" id="liveReload" title="Reload iframe">↻</button>
+        </div>
+        <div class="pane-body">
+          <iframe id="liveFrame" title="Live View" loading="lazy"></iframe>
+          <div class="pane-empty" id="liveEmpty" style="display:none;">
+            scene_viewer not reachable<br>
+            <span style="font-size:11px;">expected at <code id="liveUrl">—</code></span>
+          </div>
+        </div>
+      </div>
+      <div class="pane-card bt">
+        <div class="pane-header">Behavior Tree
+          <span class="pane-host">(placeholder)</span>
+        </div>
+        <div class="pane-body">
+          <div class="pane-empty">
+            BT runtime not wired yet (Phase 1).<br>
+            <span style="font-size:11px;">live tree view + node status will land here.</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
 
 <script>
@@ -316,9 +400,18 @@ const sendBtn = document.getElementById('send');
 const wsDot = document.getElementById('wsDot');
 const wsLabel = document.getElementById('wsLabel');
 const resetBtn = document.getElementById('resetBtn');
+const layout = document.getElementById('layout');
+const toggleLeft = document.getElementById('toggleLeft');
+const toggleRight = document.getElementById('toggleRight');
+const convList = document.getElementById('convList');
+const newChatBtn = document.getElementById('newChatBtn');
+const liveFrame = document.getElementById('liveFrame');
+const liveReload = document.getElementById('liveReload');
+const liveHost = document.getElementById('liveHost');
+const liveUrl = document.getElementById('liveUrl');
+const liveEmpty = document.getElementById('liveEmpty');
 document.getElementById('serverHost').textContent = location.host;
 
-// marked.js — GFM on so tables / lists / fenced code work.
 if (window.marked) {
   marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
 }
@@ -327,24 +420,24 @@ const history = [];
 let ws = null;
 let inflight = false;
 let activeAssistantBubble = null;
-let conversationId = null;     // current conversation; null = "fresh, mint on first send"
-const convList = document.getElementById('convList');
-const newChatBtn = document.getElementById('newChatBtn');
+let conversationId = null;
+
+// --- helpers ---------------------------------------------------------------
 
 function escapeHtml(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
-
 function md(text) {
   if (!window.marked) return escapeHtml(text);
   const raw = marked.parse(String(text || ''));
   return window.DOMPurify ? DOMPurify.sanitize(raw) : raw;
 }
-
 function clearEmpty() {
   if (empty && empty.parentNode) empty.remove();
 }
+
+// --- chat rendering --------------------------------------------------------
 
 function addUser(text) {
   clearEmpty();
@@ -354,7 +447,6 @@ function addUser(text) {
   log.appendChild(wrap);
   log.scrollTop = log.scrollHeight;
 }
-
 function ensureAssistantBubble() {
   if (activeAssistantBubble) return activeAssistantBubble;
   clearEmpty();
@@ -366,27 +458,21 @@ function ensureAssistantBubble() {
   log.scrollTop = log.scrollHeight;
   return activeAssistantBubble;
 }
-
 function appendAssistantText(text) {
   const bubble = ensureAssistantBubble();
-  // Cumulate raw text + re-render through markdown each time so partial
-  // streams (incomplete fences, half-tables) still produce something
-  // sensible while the API streams tokens.
   bubble.dataset.raw = (bubble.dataset.raw || '') + text;
   bubble.innerHTML = md(bubble.dataset.raw);
   log.scrollTop = log.scrollHeight;
 }
-
-function addToolCall(name, input, id) {
+function addToolCall(name, inputObj, id) {
   clearEmpty();
   activeAssistantBubble = null;
   const tool = document.createElement('details');
   tool.className = 'tool';
   tool.dataset.state = 'pending';
   tool.id = `tool-${id}`;
-  tool.open = false;
   let argText = '';
-  try { argText = JSON.stringify(input || {}, null, 2); } catch (_) { argText = String(input); }
+  try { argText = JSON.stringify(inputObj || {}, null, 2); } catch (_) { argText = String(inputObj); }
   tool.innerHTML = `
     <summary>🔧 <strong>${escapeHtml(name)}</strong>
       <span style="opacity:0.6">running…</span></summary>
@@ -397,37 +483,27 @@ function addToolCall(name, input, id) {
   log.appendChild(tool);
   log.scrollTop = log.scrollHeight;
 }
-
 function blocksToHtml(blocks) {
-  if (!Array.isArray(blocks) || !blocks.length) {
-    return '<pre>(no content)</pre>';
-  }
+  if (!Array.isArray(blocks) || !blocks.length) return '<pre>(no content)</pre>';
   const parts = [];
   for (const b of blocks) {
-    if (b.type === 'text') {
-      parts.push(`<pre>${escapeHtml(b.text || '')}</pre>`);
-    } else if (b.type === 'image') {
+    if (b.type === 'text') parts.push(`<pre>${escapeHtml(b.text || '')}</pre>`);
+    else if (b.type === 'image') {
       const src = b.source || {};
       if (src.type === 'base64' && src.data) {
         const mime = src.media_type || 'image/png';
         parts.push(`<img alt="tool result image" src="data:${mime};base64,${src.data}">`);
-      } else {
-        parts.push('<pre>[image — unrenderable source]</pre>');
-      }
-    } else {
-      parts.push(`<pre>${escapeHtml(JSON.stringify(b))}</pre>`);
-    }
+      } else parts.push('<pre>[image — unrenderable source]</pre>');
+    } else parts.push(`<pre>${escapeHtml(JSON.stringify(b))}</pre>`);
   }
   return parts.join('');
 }
-
 function finishToolCall(id, name, isError, summary, content) {
   const tool = document.getElementById(`tool-${id}`);
   if (!tool) return;
   tool.dataset.state = isError ? 'error' : 'success';
   const icon = isError ? '❌' : '✓';
   const summaryText = summary || (isError ? 'failed' : 'ok');
-  // Preserve the existing arguments pre block.
   const argBody = tool.querySelector('.body') ? tool.querySelector('.body').innerHTML : '';
   tool.innerHTML = `
     <summary>${icon} <strong>${escapeHtml(name)}</strong>
@@ -439,7 +515,6 @@ function finishToolCall(id, name, isError, summary, content) {
     </div>`;
   log.scrollTop = log.scrollHeight;
 }
-
 function appendSystem(text) {
   clearEmpty();
   const div = document.createElement('div');
@@ -448,7 +523,6 @@ function appendSystem(text) {
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
-
 function setWsStatus(state) {
   wsDot.classList.remove('ok', 'bad');
   if (state === 'open') { wsDot.classList.add('ok'); wsLabel.textContent = 'connected'; }
@@ -456,14 +530,13 @@ function setWsStatus(state) {
   else { wsLabel.textContent = state; }
 }
 
+// --- WS --------------------------------------------------------------------
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/chat`);
   ws.addEventListener('open', () => setWsStatus('open'));
-  ws.addEventListener('close', () => {
-    setWsStatus('closed');
-    setTimeout(connect, 2000);
-  });
+  ws.addEventListener('close', () => { setWsStatus('closed'); setTimeout(connect, 2000); });
   ws.addEventListener('error', () => setWsStatus('error'));
   ws.addEventListener('message', (ev) => {
     let m;
@@ -500,6 +573,8 @@ function connect() {
   });
 }
 
+// --- composer --------------------------------------------------------------
+
 function autoSize() {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 200) + 'px';
@@ -521,8 +596,14 @@ function submit() {
     conversation_id: conversationId,
   }));
 }
+sendBtn.addEventListener('click', submit);
+input.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  submit();
+});
 
-// --- conversation list / load -----------------------------------------------
+// --- conversation list / load ---------------------------------------------
 
 async function refreshConversationList() {
   let data;
@@ -564,7 +645,6 @@ async function refreshConversationList() {
     convList.appendChild(row);
   }
 }
-
 async function loadConversation(id) {
   let payload;
   try {
@@ -579,14 +659,24 @@ async function loadConversation(id) {
   await refreshConversationList();
   input.focus();
 }
-
 function rerenderFromHistory() {
   log.innerHTML = '';
   if (!history.length) { log.appendChild(empty); return; }
   for (const m of history) {
     if (m.role === 'user') {
-      const text = extractText(m.content);
-      if (text) addUser(text);
+      // user message can either be a text turn or a list of tool_results.
+      if (Array.isArray(m.content)) {
+        const text = m.content.filter(b => b && b.type === 'text').map(b => b.text || '').join('');
+        if (text) addUser(text);
+        for (const b of m.content) {
+          if (b && b.type === 'tool_result') {
+            finishToolCall(b.tool_use_id || '', '(tool)',
+                           !!b.is_error, '', b.content || []);
+          }
+        }
+      } else if (typeof m.content === 'string') {
+        addUser(m.content);
+      }
     } else if (m.role === 'assistant') {
       activeAssistantBubble = null;
       const blocks = Array.isArray(m.content) ? m.content : [];
@@ -594,30 +684,12 @@ function rerenderFromHistory() {
         if (b.type === 'text' && b.text) appendAssistantText(b.text);
         else if (b.type === 'tool_use') {
           addToolCall(b.name || '(tool)', b.input || {}, b.id || '');
-          // Mark as pending; the matching tool_result comes from the
-          // next user message in the saved transcript.
-        }
-      }
-    } else if (m.role === 'user' && Array.isArray(m.content)) {
-      // tool_result blocks live inside a user message in Anthropic's
-      // shape — find them and update the matching tool card.
-      for (const b of m.content) {
-        if (b.type === 'tool_result') {
-          finishToolCall(b.tool_use_id || '', '(tool)',
-                         !!b.is_error, '', b.content || []);
         }
       }
     }
   }
   activeAssistantBubble = null;
 }
-
-function extractText(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content.filter(b => b && b.type === 'text').map(b => b.text || '').join('');
-}
-
 newChatBtn.addEventListener('click', () => {
   conversationId = null;
   history.length = 0;
@@ -628,24 +700,57 @@ newChatBtn.addEventListener('click', () => {
   input.focus();
 });
 
-sendBtn.addEventListener('click', submit);
-input.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
-  e.preventDefault();
-  submit();
-});
+// --- header buttons --------------------------------------------------------
+
+function persistLayoutPrefs() {
+  try {
+    localStorage.setItem('vlabor_agent.layout', JSON.stringify({
+      collapseLeft: layout.classList.contains('collapse-left'),
+      collapseRight: layout.classList.contains('collapse-right'),
+    }));
+  } catch (_) {}
+}
+function restoreLayoutPrefs() {
+  try {
+    const raw = localStorage.getItem('vlabor_agent.layout');
+    if (!raw) return;
+    const p = JSON.parse(raw);
+    if (p.collapseLeft) layout.classList.add('collapse-left');
+    if (p.collapseRight) layout.classList.add('collapse-right');
+  } catch (_) {}
+}
+toggleLeft.addEventListener('click', () => { layout.classList.toggle('collapse-left'); persistLayoutPrefs(); });
+toggleRight.addEventListener('click', () => { layout.classList.toggle('collapse-right'); persistLayoutPrefs(); });
+restoreLayoutPrefs();
 
 resetBtn.addEventListener('click', () => {
-  // Reset within the *current* conversation: drop client-side history
-  // so the next send starts fresh, but the saved conversation file is
-  // left alone (delete from the sidebar to discard it on disk).
   history.length = 0;
   conversationId = null;
   log.innerHTML = '';
   log.appendChild(empty);
-  appendSystem('chat cleared (new conversation will be created on next send)');
+  appendSystem('chat cleared (next send creates a new conversation)');
   refreshConversationList();
 });
+
+// --- right pane: Live View probe -------------------------------------------
+
+function setLiveView() {
+  // scene_viewer convention: same host, port 8097. If the host can't
+  // reach it (e.g. running this UI from a laptop pointed at a robot's
+  // backend), the iframe just shows browser's own connection error
+  // and we surface the URL in the empty state.
+  const host = location.hostname;
+  const url = `${location.protocol}//${host}:8097/`;
+  liveHost.textContent = `${host}:8097`;
+  liveUrl.textContent = url;
+  liveFrame.src = url;
+}
+liveReload.addEventListener('click', () => {
+  liveFrame.src = liveFrame.src;  // force reload
+});
+setLiveView();
+
+// --- boot ------------------------------------------------------------------
 
 connect();
 refreshConversationList();
