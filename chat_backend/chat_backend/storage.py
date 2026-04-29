@@ -151,6 +151,27 @@ class ConversationStore:
         except OSError:
             return False
 
+    def set_meta(self, conversation_id: str, **fields: Any) -> bool:
+        """Merge top-level fields into the conversation file. Used for
+        marking auto-generated diagnostic sessions (``origin="auto"``)
+        and stamping the trigger payload (``trigger_components``)."""
+        cid = _safe_id(conversation_id)
+        if not cid:
+            return False
+        existing = self.load(cid)
+        if existing is None:
+            return False
+        existing.update({k: v for k, v in fields.items() if v is not None})
+        existing["updated_at"] = _now_iso()
+        try:
+            (self.root / f"{cid}.json").write_text(
+                json.dumps(existing, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return True
+        except OSError:
+            return False
+
     def delete(self, conversation_id: str) -> bool:
         cid = _safe_id(conversation_id)
         if not cid:

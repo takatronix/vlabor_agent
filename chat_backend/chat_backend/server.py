@@ -99,6 +99,140 @@ async def _create_conversation(request: web.Request) -> web.Response:
     return web.json_response({"id": cid})
 
 
+# ---------------------------------------------------------------------------
+# Auto-diagnose entry point
+# ---------------------------------------------------------------------------
+#
+# Called by vlabor_dashboard whenever a /vlabor/health component flips to
+# ``critical`` (per-component cooldown applied on the dashboard side). The
+# endpoint mints a fresh conversation tagged ``origin=auto``, kicks off a
+# background task that runs the chat-loop with a templated prompt, and
+# returns immediately so the dashboard's 1Hz health timer isn't blocked.
+#
+# Output is persisted to the conversation store; the dashboard's chat
+# tab can poll /api/conversations to surface the new session as an alert.
+# A live-tail WebSocket is intentionally out of scope for this slice —
+# the conversation list refresh is enough for the operator UX, and adding
+# a pubsub channel would make the storage path more complex than it is
+# at this stage of the project.
+
+_DIAGNOSE_SYSTEM_PROMPT = (
+    "あなたは VLAbor の自動診断エージェントです。critical 異常検知により"
+    " 自動起動されました。次の手順で日本語で回答してください:\n\n"
+    "1. vlabor-diagnostics MCP の get_health_snapshot で全体状況を確認。\n"
+    "2. 失敗コンポーネントごとに get_component_detail で詳細を取得。\n"
+    "3. read_ros_logs(node=<該当ノード>, level_min=30) で直近のエラーログを確認。\n"
+    "4. read_vlabor_events(category='device' or 'pipeline', since_sec=600)\n"
+    "   で関連イベントを確認。必要に応じてカメラ画像 (vlabor-perception)\n"
+    "   など他 MCP も参照可。\n"
+    "5. 各失敗コンポーネントについて vlabor-visual.show_diagnostic_marker\n"
+    "   を呼び、profile が visual_anchor_frame を宣言しているなら\n"
+    "   その frame に severity 付きでマーカーを出す。title は短く\n"
+    "   (例『D405 切断』)、detail は対策の一行 (例『USB を再接続』)。\n"
+    "6. 最後に診断結論を 3 行以内でまとめる。形式は:\n"
+    "     原因: ...\n"
+    "     根拠: ... (どのログ / どの component の状態を見たか)\n"
+    "     対策: ... (オペレーターが今できる行動)\n"
+    "7. record_event(category='diagnostic', severity=<critical|warning>,\n"
+    "   source=<component_id>, code=<short upper>, message=<one-line>,\n"
+    "   remediation=<対策>) で診断結論を /vlabor/events に publish。\n\n"
+    "禁止: 推測だけで結論しない、log/event を読まずに走らない、Live\n"
+    "View マーカーを忘れない。"
+)
+
+
+async def _run_diagnose_session(app: web.Application, cid: str,
+                                trigger: dict) -> None:
+    """Background coroutine: drives one chat-loop turn for an
+    auto-triggered diagnosis. Stores the transcript on completion.
+    Handles errors gracefully — the dashboard already moved on after
+    POSTing, so any failure here is logged, not surfaced upstream."""
+    cfg: ChatBackendConfig = app["cfg"]
+    pool: McpPool = app["mcp_pool"]
+    store: ConversationStore = app["store"]
+    api_key = read_api_key(cfg.api_key_path)
+    if not api_key:
+        log.warning("[diagnose] no API key at %s — skipping session %s",
+                    cfg.api_key_path, cid)
+        store.set_meta(cid, origin="auto", trigger=trigger,
+                       title="自動診断: APIキー未設定でスキップ")
+        return
+
+    components = trigger.get("components") or []
+    user_prompt_lines = ["異常検知。以下のコンポーネントが critical です:"]
+    for c in components:
+        line = f"- id={c.get('id')} label={c.get('label')} "
+        line += f"severity={c.get('severity')} message={c.get('message')!r}"
+        if c.get("visual_anchor_frame"):
+            line += f" anchor={c['visual_anchor_frame']}"
+        user_prompt_lines.append(line)
+    user_prompt_lines.append("\n上記の手順に従って診断してください。")
+    user_text = "\n".join(user_prompt_lines)
+
+    messages: list[dict] = [
+        {"role": "user", "content": [
+            {"type": "text", "text": _DIAGNOSE_SYSTEM_PROMPT + "\n\n" + user_text}
+        ]}
+    ]
+    title = "自動診断: " + ", ".join(
+        str(c.get("label") or c.get("id") or "?") for c in components
+    )[:60]
+    store.set_meta(cid, origin="auto", trigger=trigger, title=title)
+
+    client = AsyncAnthropic(api_key=api_key)
+    try:
+        from .chat_loop import run_chat
+        async for _event in run_chat(
+            client=client, model=cfg.anthropic_model,
+            messages=messages, pool=pool,
+        ):
+            # Drain events: nothing live-streams them, but the chat
+            # loop appends to ``messages`` only after each iteration.
+            # We just keep the loop going until ``done``.
+            pass
+    except Exception as exc:  # pragma: no cover — surfaced to log only
+        log.exception("[diagnose] session %s failed: %s", cid, exc)
+        messages.append({"role": "assistant", "content": [
+            {"type": "text", "text": f"(診断中にエラー: {exc})"}
+        ]})
+    store.save(cid, messages)
+    store.set_meta(cid, origin="auto", trigger=trigger, title=title)
+    log.info("[diagnose] session %s done (%d messages)", cid, len(messages))
+
+
+async def _post_diagnose(request: web.Request) -> web.Response:
+    """Auto-diagnose trigger from vlabor_dashboard. Body schema::
+
+        {"trigger": "auto", "profile": "...",
+         "components": [
+            {"id": "d405_color", "label": "...", "severity": "critical",
+             "message": "...", "remediation": "...",
+             "visual_anchor_frame": "d405_link", "category": "device"}
+         ]}
+
+    Returns the freshly minted conversation id immediately; the actual
+    LLM run happens in a background asyncio task.
+    """
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return web.json_response({"error": "invalid json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "expected json object"}, status=400)
+    components = body.get("components") or []
+    if not isinstance(components, list) or not components:
+        return web.json_response(
+            {"error": "components[] required"}, status=400)
+
+    store: ConversationStore = request.app["store"]
+    cid = store.create()
+    asyncio.get_event_loop().create_task(
+        _run_diagnose_session(request.app, cid, body))
+    return web.json_response(
+        {"ok": True, "conversation_id": cid, "components": len(components)},
+    )
+
+
 async def _ws_chat(request: web.Request) -> web.WebSocketResponse:
     cfg: ChatBackendConfig = request.app["cfg"]
     pool: McpPool = request.app["mcp_pool"]
@@ -187,6 +321,7 @@ def build_app(cfg: ChatBackendConfig) -> web.Application:
     app.router.add_post("/api/conversations", _create_conversation)
     app.router.add_get(r"/api/conversations/{cid}", _get_conversation)
     app.router.add_delete(r"/api/conversations/{cid}", _delete_conversation)
+    app.router.add_post("/diagnose", _post_diagnose)
     return app
 
 
