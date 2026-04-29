@@ -62,12 +62,18 @@ async def run_chat(
         # arrive complete in the final message.
         try:
             text_so_far = ""
-            async with client.messages.stream(
-                model=model,
-                max_tokens=1024,
-                tools=tools or None,  # don't send empty array — confuses the API
-                messages=messages,
-            ) as stream:
+            # Anthropic rejects both an empty list AND an explicit
+            # ``tools=null`` for the tools field. Omit the kwarg
+            # entirely when no MCP tools are wired up so an
+            # MCP-pool-not-ready boot state doesn't 400 the chat.
+            stream_kwargs: dict[str, Any] = {
+                "model": model,
+                "max_tokens": 1024,
+                "messages": messages,
+            }
+            if tools:
+                stream_kwargs["tools"] = tools
+            async with client.messages.stream(**stream_kwargs) as stream:
                 async for chunk in stream.text_stream:
                     if not chunk:
                         continue
