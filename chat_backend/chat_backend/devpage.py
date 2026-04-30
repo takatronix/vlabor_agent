@@ -989,8 +989,27 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/chat`);
   ws.addEventListener('open', () => setWsStatus('open'));
-  ws.addEventListener('close', () => { setWsStatus('closed'); setTimeout(connect, 2000); });
-  ws.addEventListener('error', () => setWsStatus('error'));
+  ws.addEventListener('close', () => {
+    setWsStatus('closed');
+    // If a turn was in flight when the socket dropped, no `done`/`error`
+    // event will ever arrive — clear the stuck state so the user can try
+    // again instead of staring at a permanently-disabled send button.
+    if (inflight) {
+      inflight = false;
+      sendBtn.disabled = false;
+      activeAssistantBubble = null;
+      appendSystem('(connection lost — please retry)');
+    }
+    setTimeout(connect, 2000);
+  });
+  ws.addEventListener('error', () => {
+    setWsStatus('error');
+    if (inflight) {
+      inflight = false;
+      sendBtn.disabled = false;
+      activeAssistantBubble = null;
+    }
+  });
   ws.addEventListener('message', (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch (_) { return; }
