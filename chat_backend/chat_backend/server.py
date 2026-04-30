@@ -109,6 +109,19 @@ async def _get_mcp_status(request: web.Request) -> web.Response:
     })
 
 
+async def _post_mcp_reload(request: web.Request) -> web.Response:
+    """Wake any disconnected MCP supervisor so it retries immediately
+    instead of waiting out its backoff. Useful when the operator has
+    just brought up an MCP server that was missing at agent startup."""
+    pool: McpPool = request.app["mcp_pool"]
+    woken = await pool.reload()
+    return web.json_response({
+        "ok": True,
+        "woken": woken,
+        "servers": pool.mcp_status(),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Conversations
 # ---------------------------------------------------------------------------
@@ -587,6 +600,7 @@ def build_app(cfg: ChatBackendConfig) -> web.Application:
     app.router.add_get("/api/keys/status", _get_keys_status)
     app.router.add_post("/api/keys", _post_keys)
     app.router.add_get("/api/mcp/status", _get_mcp_status)
+    app.router.add_post("/api/mcp/reload", _post_mcp_reload)
     app.router.add_get("/api/settings", _get_settings)
     app.router.add_put("/api/settings", _put_settings)
     app.router.add_post("/api/stt", _post_stt)
