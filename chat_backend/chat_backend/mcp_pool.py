@@ -178,7 +178,20 @@ class McpPool:
             raise RuntimeError(f"mcp server not connected: {server_name}")
         if tool_name not in st.tool_names:
             raise RuntimeError(f"unknown tool {tool_name} on {server_name}")
-        return await st.session.call_tool(tool_name, args or {})
+        try:
+            return await st.session.call_tool(tool_name, args or {})
+        except Exception:
+            # The supervisor's ping-based liveness check only fires every
+            # _PING_INTERVAL (15s), so without this nudge the next several
+            # calls would also fail before reconnect kicks in. Wake the
+            # supervisor so it tears down and reconnects immediately —
+            # subsequent calls (which the LLM typically retries) hit a
+            # fresh session within ~1s instead of 15s.
+            if st.wake_event is not None:
+                st.connected = False
+                st.backoff = _BACKOFF_INITIAL
+                st.wake_event.set()
+            raise
 
     async def reload(self) -> list[str]:
         """Wake every disconnected supervisor so it retries immediately
@@ -276,11 +289,19 @@ class McpPool:
 
     async def _monitor(self, st: _ServerState) -> None:
         """Ping the session at a fixed interval. Returns when the session
-        becomes unresponsive — the supervisor will then reconnect."""
+        becomes unresponsive — the supervisor will then reconnect.
+
+        The interval sleep is interruptible via ``wake_event`` so that a
+        failed ``call()`` can drop us out of the wait immediately rather
+        than letting up to _PING_INTERVAL seconds of broken state pile
+        up before the next ping notices."""
         assert st.session is not None
         while not self._closing and st.connected:
             try:
-                await asyncio.sleep(_PING_INTERVAL)
+                await asyncio.wait_for(st.wake_event.wait(), timeout=_PING_INTERVAL)
+                st.wake_event.clear()
+            except asyncio.TimeoutError:
+                pass
             except asyncio.CancelledError:
                 raise
             if self._closing or not st.connected:
