@@ -84,10 +84,12 @@ async def _index(request: web.Request) -> web.Response:
 
 
 async def _healthz(request: web.Request) -> web.Response:
+    cfg: ChatBackendConfig = request.app["cfg"]
     pool: McpPool = request.app["mcp_pool"]
     return web.json_response(
         {
             "ok": True,
+            "mcp_config_source": cfg.mcp_config_source,
             "mcp_servers": pool.server_names(),
             "tool_count": len(pool.tools_for_anthropic()),
         }
@@ -98,8 +100,13 @@ async def _get_mcp_status(request: web.Request) -> web.Response:
     """Per-server view of the MCP pool — connection state, configured
     URL, and the tool catalogue. Drives the right-pane MCP status
     panel in devpage.py."""
+    cfg: ChatBackendConfig = request.app["cfg"]
     pool: McpPool = request.app["mcp_pool"]
-    return web.json_response({"ok": True, "servers": pool.mcp_status()})
+    return web.json_response({
+        "ok": True,
+        "mcp_config_source": cfg.mcp_config_source,
+        "servers": pool.mcp_status(),
+    })
 
 
 # ---------------------------------------------------------------------------
