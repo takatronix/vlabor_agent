@@ -63,6 +63,7 @@ async def _on_startup(app: web.Application) -> None:
     # Live set of /chat WS clients — used for voice_announce fan-out.
     # Updated from inside the WS handler.
     app["ws_clients"] = set()
+    log.info("[startup] MCP config source: %s", cfg.mcp_config_source)
     log.info("[startup] MCP servers connected: %s", pool.server_names())
     log.info("[startup] conversation store: %s", app["store"].root)
     log.info("[startup] profile_dir: %s", cfg.profile_dir)

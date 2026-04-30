@@ -31,7 +31,8 @@ RUN pip install \
       "openai>=1.40.0" \
       "aiohttp>=3.10.0" \
       "mcp>=1.0.0" \
-      "pydantic>=2.5.0"
+      "pydantic>=2.5.0" \
+      "pyyaml>=6.0.0"
 
 WORKDIR /app/chat_backend
 COPY chat_backend/ /app/chat_backend/

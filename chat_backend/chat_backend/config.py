@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import yaml
 
 from . import keys
 
@@ -69,6 +72,7 @@ class ChatBackendConfig:
     api_key_path: str = "~/.vlabor/profiles/piper_single_teleop/anthropic_api_key.txt"
 
     mcp_servers: list[McpServerConfig] = field(default_factory=list)
+    mcp_config_source: str = "unset"
 
     def anthropic_key(self) -> str | None:
         return keys.read_key(self.profile_dir, "anthropic")
@@ -109,21 +113,10 @@ class ChatBackendConfig:
         if env_profile_dir := os.environ.get("VLABOR_AGENT_PROFILE_DIR"):
             cfg.profile_dir = env_profile_dir
 
-        # Phase 0 default: connect to the full vlabor MCP set if no
-        # servers were configured. ``./run`` then has immediate utility
-        # on a vlabor host without any extra config. Operators on
-        # other robots will set ``mcp_servers`` in
-        # ~/.vlabor/agent/config.json instead.
         if not cfg.mcp_servers:
-            cfg.mcp_servers = [
-                McpServerConfig(name="vlabor-obs",        transport="sse", url="http://127.0.0.1:9100/sse"),
-                McpServerConfig(name="vlabor-ros",        transport="sse", url="http://127.0.0.1:9101/sse"),
-                McpServerConfig(name="vlabor-perception", transport="sse", url="http://127.0.0.1:9102/sse"),
-                McpServerConfig(name="vlabor-control",    transport="sse", url="http://127.0.0.1:9103/sse"),
-                McpServerConfig(name="vlabor-visual",     transport="sse", url="http://127.0.0.1:9105/sse"),
-                McpServerConfig(name="vlabor-diagnostics", transport="sse", url="http://127.0.0.1:9106/sse"),
-                McpServerConfig(name="vlabor-canvas",     transport="sse", url="http://127.0.0.1:9107/sse"),
-            ]
+            cfg.mcp_servers, cfg.mcp_config_source = _load_profile_mcp_servers()
+        if not cfg.mcp_servers:
+            cfg.mcp_config_source = "none"
         return cfg
 
 
@@ -158,7 +151,67 @@ def _apply_overrides(cfg: ChatBackendConfig, data: dict) -> ChatBackendConfig:
                     env=entry.get("env") or {},
                 )
             )
+        cfg.mcp_config_source = "~/.vlabor/agent/config.json"
     return cfg
+
+
+def _load_profile_mcp_servers() -> tuple[list[McpServerConfig], str]:
+    profiles_dir = Path(os.path.expanduser("~/.vlabor/profiles"))
+    active_profile = _read_active_profile(profiles_dir)
+    profile_path = profiles_dir / f"{active_profile}.yaml"
+    if not active_profile or not profile_path.exists():
+        return [], "profile:not-found"
+    try:
+        data = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        print(f"[chat_backend] failed to read MCP profile {profile_path}: {exc}")
+        return [], f"profile:{active_profile}:error"
+
+    profile = data.get("profile") if isinstance(data.get("profile"), dict) else {}
+    dashboard = data.get("dashboard") or profile.get("dashboard") or {}
+    bridges = (((dashboard or {}).get("mcp") or {}).get("bridges") or [])
+    servers: list[McpServerConfig] = []
+    for bridge in bridges:
+        if not isinstance(bridge, dict):
+            continue
+        if str(bridge.get("kind") or "").lower() != "tcp":
+            continue
+        port = bridge.get("port")
+        try:
+            port_i = int(port)
+        except (TypeError, ValueError):
+            continue
+        host = str(bridge.get("host") or "127.0.0.1").strip()
+        name = _mcp_name_from_bridge(bridge)
+        servers.append(
+            McpServerConfig(
+                name=name,
+                transport="sse",
+                url=f"http://{host}:{port_i}/sse",
+            )
+        )
+    return servers, f"profile:{profile_path}"
+
+
+def _read_active_profile(profiles_dir: Path) -> str:
+    active_file = profiles_dir / ".active_profile"
+    try:
+        value = active_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        value = ""
+    return value or "piper_single_teleop"
+
+
+def _mcp_name_from_bridge(bridge: dict) -> str:
+    label = str(bridge.get("label") or "")
+    match = re.search(r"\b(vlabor-[a-z0-9_-]+)\b", label)
+    if match:
+        return match.group(1)
+    raw_id = str(bridge.get("id") or "").strip().lower()
+    if raw_id.endswith("_mcp"):
+        raw_id = raw_id[:-4]
+    raw_id = raw_id.replace("_", "-")
+    return f"vlabor-{raw_id}" if raw_id else "vlabor-mcp"
 
 
 def read_api_key(path: str) -> str | None:
