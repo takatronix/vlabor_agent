@@ -73,8 +73,46 @@ class McpPool:
     def server_names(self) -> list[str]:
         return list(self._servers.keys())
 
+    def mcp_status(self) -> list[dict[str, Any]]:
+        """Per-server snapshot for the UI: connection state, configured
+        URL, tool count, tool names. Includes servers that failed to
+        connect so the operator can tell what's missing vs. just empty."""
+        out: list[dict[str, Any]] = []
+        connected = self._servers
+        for cfg in self._configs:
+            handle = connected.get(cfg.name)
+            out.append({
+                "name": cfg.name,
+                "url": cfg.url,
+                "transport": cfg.transport,
+                "connected": handle is not None,
+                "tool_count": len(handle.tool_names) if handle else 0,
+                "tools": list(handle.tool_names) if handle else [],
+            })
+        return out
+
     def tools_for_anthropic(self) -> list[dict[str, Any]]:
         return list(self._tools_anthropic)
+
+    def tools_for_openai(self) -> list[dict[str, Any]]:
+        """Return the same tools repacked into OpenAI's function-calling
+        spec. Names stay qualified (``<server>__<tool>``) so the
+        dispatcher in :meth:`call` keeps working unchanged for both
+        providers."""
+        out: list[dict[str, Any]] = []
+        for spec in self._tools_anthropic:
+            out.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": spec["name"],
+                        "description": spec.get("description", ""),
+                        "parameters": spec.get("input_schema")
+                                      or {"type": "object", "properties": {}},
+                    },
+                }
+            )
+        return out
 
     async def call(self, qualified_name: str, args: dict[str, Any]) -> Any:
         server_name, tool_name = _split_name(qualified_name)

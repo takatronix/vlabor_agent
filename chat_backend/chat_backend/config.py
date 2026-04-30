@@ -2,12 +2,19 @@
 
 Sources, in priority order:
   1. environment variables (VLABOR_AGENT_*)
-  2. ~/.vlabor/agent/config.json (per-user)
+  2. ~/.vlabor/agent/config.json (per-user, deployment-time)
   3. baked-in defaults below
 
-Anthropic API key is *not* read here — it lives on disk under
-``api_key_path`` (default: ``~/.vlabor/profiles/<profile>/anthropic_api_key.txt``)
-and is read on demand so a key rotation doesn't need a restart.
+API keys are *not* read here — they live on disk under
+``profile_dir`` (default: ``~/.vlabor/profiles/piper_single_teleop/``)
+as ``<provider>_api_key.txt`` files. Reading happens on demand via
+:mod:`.keys` so a key rotation doesn't need a restart.
+
+Per-operator preferences (provider choice, voice settings) live in
+``~/.vlabor/agent/settings.json`` and are managed by
+:mod:`.user_settings` — separate from ``config.json`` because operator
+preferences change often (UI), while ``config.json`` is a deployment
+artefact (host/port/MCP wiring).
 """
 
 from __future__ import annotations
@@ -16,6 +23,8 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import keys
 
 
 @dataclass
@@ -47,9 +56,25 @@ class ChatBackendConfig:
     running side-by-side."""
 
     anthropic_model: str = "claude-sonnet-4-6"
+    """Default model when settings.json doesn't specify one."""
+
+    profile_dir: str = "~/.vlabor/profiles/piper_single_teleop"
+    """Directory holding ``<provider>_api_key.txt`` files. Each profile
+    gets its own dir so dev / prod keys don't co-mingle."""
+
+    # Backwards-compatibility shim — the original code passed a single
+    # ``api_key_path`` pointing at the Anthropic key file. Old callers
+    # of ``read_api_key(cfg.api_key_path)`` still work; new code should
+    # use ``keys.read_key(cfg.profile_dir, 'anthropic')`` directly.
     api_key_path: str = "~/.vlabor/profiles/piper_single_teleop/anthropic_api_key.txt"
 
     mcp_servers: list[McpServerConfig] = field(default_factory=list)
+
+    def anthropic_key(self) -> str | None:
+        return keys.read_key(self.profile_dir, "anthropic")
+
+    def openai_key(self) -> str | None:
+        return keys.read_key(self.profile_dir, "openai")
 
     @classmethod
     def load(cls) -> "ChatBackendConfig":
@@ -78,6 +103,11 @@ class ChatBackendConfig:
             cfg.anthropic_model = env_model
         if env_key_path := os.environ.get("VLABOR_AGENT_API_KEY_PATH"):
             cfg.api_key_path = env_key_path
+            # Derive profile_dir from the key path so the OpenAI key and
+            # other per-provider files end up next to it.
+            cfg.profile_dir = str(Path(os.path.expanduser(env_key_path)).parent)
+        if env_profile_dir := os.environ.get("VLABOR_AGENT_PROFILE_DIR"):
+            cfg.profile_dir = env_profile_dir
 
         # Phase 0 default: connect to the full vlabor MCP set if no
         # servers were configured. ``./run`` then has immediate utility
@@ -93,6 +123,7 @@ class ChatBackendConfig:
                 McpServerConfig(name="vlabor-arm",        transport="sse", url="http://127.0.0.1:9104/sse"),
                 McpServerConfig(name="vlabor-visual",     transport="sse", url="http://127.0.0.1:9105/sse"),
                 McpServerConfig(name="vlabor-diagnostics", transport="sse", url="http://127.0.0.1:9106/sse"),
+                McpServerConfig(name="vlabor-canvas",     transport="sse", url="http://127.0.0.1:9107/sse"),
             ]
         return cfg
 
@@ -106,6 +137,9 @@ def _apply_overrides(cfg: ChatBackendConfig, data: dict) -> ChatBackendConfig:
         cfg.anthropic_model = data["anthropic_model"]
     if isinstance(data.get("api_key_path"), str):
         cfg.api_key_path = data["api_key_path"]
+        cfg.profile_dir = str(Path(os.path.expanduser(data["api_key_path"])).parent)
+    if isinstance(data.get("profile_dir"), str):
+        cfg.profile_dir = data["profile_dir"]
     servers = data.get("mcp_servers")
     if isinstance(servers, list):
         cfg.mcp_servers = []
@@ -129,6 +163,8 @@ def _apply_overrides(cfg: ChatBackendConfig, data: dict) -> ChatBackendConfig:
 
 
 def read_api_key(path: str) -> str | None:
+    """Backwards-compat helper. Prefer :meth:`ChatBackendConfig.anthropic_key`
+    or :func:`.keys.read_key` for new code."""
     expanded = Path(os.path.expanduser(path))
     if not expanded.exists():
         return None

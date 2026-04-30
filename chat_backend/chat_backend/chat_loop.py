@@ -1,19 +1,22 @@
-"""Anthropic Messages API + MCP tool-use loop.
+"""Provider-agnostic tool-use loop.
 
-The loop runs until Claude produces a ``stop_reason`` other than
-``tool_use``. On each iteration we:
+The loop runs until the chosen provider's stream emits a stop event
+with ``stop_reason != "tool_use"``. Each iteration:
 
-  1. Send the running ``messages`` list (plus the MCP tool spec)
-     to Anthropic.
-  2. If the response is a final answer, stream it back to the caller
-     and exit.
-  3. If the response contains ``tool_use`` blocks, dispatch each one
-     to the MCP pool, append ``tool_result`` blocks (text + image
-     content preserved), and loop.
+  1. Hand the running ``messages`` list to the provider's
+     :meth:`stream_turn`. The provider yields text deltas + a single
+     ``tool_uses`` event + a ``stop`` event.
+  2. We forward the visible deltas to the WS client unchanged.
+  3. If the model wants tools, dispatch them via :class:`McpPool` and
+     append ``tool_result`` blocks (preserving image content from MCP
+     responses) for the next round.
 
-Image content from MCP tool_result is forwarded verbatim so Claude
-can do its own VLM-style reasoning over camera frames the robot
-returns. The conversion lives in :func:`_mcp_to_anthropic_blocks`.
+Image content from MCP tool_result is forwarded verbatim so Claude /
+GPT-4o can do their own VLM-style reasoning over camera frames the
+robot returns. Block conversion lives in :func:`_mcp_to_anthropic_blocks`
+— Anthropic-shape blocks are the canonical history format; the OpenAI
+provider translates at the SDK boundary in
+:func:`providers.openai_provider._to_openai_messages`.
 """
 
 from __future__ import annotations
@@ -22,24 +25,32 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from anthropic import AsyncAnthropic
-
 from .mcp_pool import McpPool
+from .providers import get_provider
 
 log = logging.getLogger(__name__)
 
 
 async def run_chat(
     *,
-    client: AsyncAnthropic,
+    client: Any | None = None,  # legacy positional kept for caller compat
     model: str,
     messages: list[dict[str, Any]],
     pool: McpPool,
     max_iterations: int = 10,
+    provider: str = "anthropic",
+    api_key: str = "",
 ) -> AsyncIterator[dict[str, Any]]:
     """Drive one chat turn to completion, yielding events as they happen.
 
+    ``provider`` selects the LLM backend (``"anthropic"`` or
+    ``"openai"``); ``api_key`` is the corresponding key. The legacy
+    ``client`` argument is accepted but ignored — the provider creates
+    its own SDK client per turn so a key rotation is picked up
+    immediately.
+
     Yielded events (envelope shape — caller wraps for transport):
+      * ``{"type": "assistant_text_delta", "text": "..."}``
       * ``{"type": "assistant_text", "text": "..."}``
       * ``{"type": "tool_use_start", "name": "...", "input": {...}, "id": "..."}``
       * ``{"type": "tool_use_result", "name": "...", "id": "...",
@@ -47,87 +58,55 @@ async def run_chat(
       * ``{"type": "done", "stop_reason": "..."}``
       * ``{"type": "error", "message": "..."}``
     """
+    impl = get_provider(provider)
+    if not model:
+        model = impl.default_model
 
-    tools = pool.tools_for_anthropic()
     iteration = 0
     while True:
         iteration += 1
         if iteration > max_iterations:
-            yield {"type": "error", "message": f"max iterations ({max_iterations}) hit"}
+            yield {"type": "error",
+                   "message": f"max iterations ({max_iterations}) hit"}
             return
 
-        # Stream the assistant turn so the UI shows incremental text
-        # rather than a single dump at the end. Anthropic's streaming
-        # API yields text deltas during generation; tool_use blocks
-        # arrive complete in the final message.
-        try:
-            text_so_far = ""
-            # Anthropic rejects both an empty list AND an explicit
-            # ``tools=null`` for the tools field. Omit the kwarg
-            # entirely when no MCP tools are wired up so an
-            # MCP-pool-not-ready boot state doesn't 400 the chat.
-            stream_kwargs: dict[str, Any] = {
-                "model": model,
-                "max_tokens": 1024,
-                "messages": messages,
-            }
-            if tools:
-                stream_kwargs["tools"] = tools
-            async with client.messages.stream(**stream_kwargs) as stream:
-                async for chunk in stream.text_stream:
-                    if not chunk:
-                        continue
-                    text_so_far += chunk
-                    yield {"type": "assistant_text_delta", "text": chunk}
-                resp = await stream.get_final_message()
-        except Exception as exc:  # pragma: no cover - surfaced to caller
-            log.exception("anthropic call failed")
-            yield {"type": "error", "message": f"anthropic call failed: {exc}"}
-            return
-
-        # Convert the SDK response into the messages-list shape we'll send
-        # back next round.
-        assistant_blocks: list[dict[str, Any]] = []
         tool_uses: list[dict[str, Any]] = []
+        assistant_blocks: list[dict[str, Any]] = []
+        stop_reason: str | None = None
 
-        for block in resp.content:
-            btype = getattr(block, "type", None)
-            if btype == "text":
-                text = getattr(block, "text", "") or ""
-                if text:
-                    # Emit a final "full text" event AFTER the deltas so
-                    # frontends that only handle the legacy event shape
-                    # still get one consolidated message per text block.
-                    # Frontends that handle deltas use this as a "this
-                    # block is complete" signal and drop their delta
-                    # buffer.
-                    yield {"type": "assistant_text", "text": text}
-                assistant_blocks.append({"type": "text", "text": text})
-            elif btype == "tool_use":
-                use = {
-                    "type": "tool_use",
-                    "id": getattr(block, "id", ""),
-                    "name": getattr(block, "name", ""),
-                    "input": getattr(block, "input", {}) or {},
-                }
-                tool_uses.append(use)
-                assistant_blocks.append(use)
-                yield {
-                    "type": "tool_use_start",
-                    "id": use["id"],
-                    "name": use["name"],
-                    "input": use["input"],
-                }
-            else:
-                # Unknown block type — preserve verbatim if possible so
-                # we don't lose anything Claude wanted to say.
-                if isinstance(block, dict):
-                    assistant_blocks.append(block)
+        async for event in impl.stream_turn(
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            anthropic_tools=pool.tools_for_anthropic(),
+            openai_tools=pool.tools_for_openai(),
+        ):
+            etype = event.get("type")
+            if etype in ("assistant_text_delta", "assistant_text"):
+                yield event
+            elif etype == "tool_uses":
+                tool_uses = event.get("tool_uses") or []
+                assistant_blocks = event.get("assistant_blocks") or []
+                # Surface each tool_use as a UI event up front so the
+                # operator sees "agent decided to call X" before the
+                # tool result lands.
+                for use in tool_uses:
+                    yield {
+                        "type": "tool_use_start",
+                        "id": use.get("id"),
+                        "name": use.get("name"),
+                        "input": use.get("input") or {},
+                    }
+            elif etype == "stop":
+                stop_reason = event.get("stop_reason")
+            elif etype == "error":
+                yield event
+                return
 
         messages.append({"role": "assistant", "content": assistant_blocks})
 
-        if resp.stop_reason != "tool_use":
-            yield {"type": "done", "stop_reason": resp.stop_reason}
+        if stop_reason != "tool_use" or not tool_uses:
+            yield {"type": "done", "stop_reason": stop_reason or "end_turn"}
             return
 
         # Dispatch each tool_use; gather tool_result blocks for the next round.
@@ -184,7 +163,9 @@ def _mcp_to_anthropic_blocks(result: Any) -> list[dict[str, Any]]:
 
     Preserves both text and image (base64) content so Claude can see
     pictures the robot returns — that's how VLM-style reasoning over
-    camera frames lands inside the chat loop.
+    camera frames lands inside the chat loop. The OpenAI provider
+    drops images today (see openai_provider._to_openai_messages); a
+    future revision can map them to GPT-4o's image input format.
     """
 
     blocks: list[dict[str, Any]] = []
@@ -210,8 +191,6 @@ def _mcp_to_anthropic_blocks(result: Any) -> list[dict[str, Any]]:
                 }
             )
         else:
-            # Unknown content type — fall back to text representation so
-            # Claude at least gets *something*.
             blocks.append({"type": "text", "text": str(item)})
 
     if not blocks:

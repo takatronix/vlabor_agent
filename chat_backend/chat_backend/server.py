@@ -1,20 +1,34 @@
 """Entry point for the chat backend.
 
-Two HTTP endpoints:
+Endpoints:
 
-  * ``GET /healthz`` — liveness probe.
-  * ``WS  /chat`` — bidirectional chat. Client sends one JSON message
-    per user turn; backend streams events (``assistant_text`` /
-    ``tool_use_start`` / ``tool_use_result`` / ``done`` / ``error``)
-    until the loop yields ``done`` or ``error``.
+  GET  /                    embedded dev page (devpage.DEV_HTML)
+  GET  /healthz             liveness probe
+  GET  /api/conversations   conversation list
+  POST /api/conversations   create empty conversation, returns id
+  GET  /api/conversations/{cid}    full transcript
+  DELETE /api/conversations/{cid}  remove from disk
+  GET  /api/keys/status     which providers have a key on disk
+  POST /api/keys            write {provider, value} to disk (chmod 0600)
+  GET  /api/settings        operator preferences (provider / voice)
+  PUT  /api/settings        partial-merge into preferences
+  POST /api/stt             multipart audio → text via Whisper
+  POST /api/tts             {text, voice?, speed?} → audio/mpeg bytes
+  POST /api/announce        broadcast voice_announce WS event
+  POST /diagnose            auto-diagnose trigger from vlabor_dashboard
+  WS   /chat                bidirectional chat (text + voice metadata)
 
-WS message shape from client:
-  ``{"type": "user_message", "text": "...", "history": [..]}``
+WS chat client message shape:
+  ``{"type": "user_message", "text": "...", "history": [..],
+     "metadata": {"input_mode": "voice" | "text"}}``
 
-``history`` is the running conversation (Anthropic ``messages``
-shape). The backend treats the client as the source of truth so a
-disconnect / refresh doesn't lose state — the new connection just
-sends history again.
+WS chat server pushes (per turn):
+  assistant_text_delta / assistant_text / tool_use_start /
+  tool_use_result / done / error / transcript
+
+Out-of-band server pushes (any time, broadcast to every chat WS):
+  ``{"type": "voice_announce", "text": "...", "severity": "...",
+     "source": "...", "ts": <unix>}``
 """
 
 from __future__ import annotations
@@ -23,15 +37,19 @@ import asyncio
 import json
 import logging
 import sys
+import time
+from typing import Any
 
 from aiohttp import WSMsgType, web
-from anthropic import AsyncAnthropic
 
 from .chat_loop import run_chat
-from .config import ChatBackendConfig, read_api_key
+from .config import ChatBackendConfig
 from .devpage import DEV_HTML
+from . import keys as keys_mod
 from .mcp_pool import McpPool
 from .storage import ConversationStore
+from . import user_settings
+from . import voice as voice_mod
 
 log = logging.getLogger(__name__)
 
@@ -42,8 +60,12 @@ async def _on_startup(app: web.Application) -> None:
     await pool.start()
     app["mcp_pool"] = pool
     app["store"] = ConversationStore()
+    # Live set of /chat WS clients — used for voice_announce fan-out.
+    # Updated from inside the WS handler.
+    app["ws_clients"] = set()
     log.info("[startup] MCP servers connected: %s", pool.server_names())
     log.info("[startup] conversation store: %s", app["store"].root)
+    log.info("[startup] profile_dir: %s", cfg.profile_dir)
 
 
 async def _on_cleanup(app: web.Application) -> None:
@@ -52,8 +74,11 @@ async def _on_cleanup(app: web.Application) -> None:
         await pool.aclose()
 
 
+# ---------------------------------------------------------------------------
+# Static / status
+# ---------------------------------------------------------------------------
+
 async def _index(request: web.Request) -> web.Response:
-    # Phase 0 dev page — replace with web_ui once that ships.
     return web.Response(text=DEV_HTML, content_type="text/html")
 
 
@@ -67,6 +92,18 @@ async def _healthz(request: web.Request) -> web.Response:
         }
     )
 
+
+async def _get_mcp_status(request: web.Request) -> web.Response:
+    """Per-server view of the MCP pool — connection state, configured
+    URL, and the tool catalogue. Drives the right-pane MCP status
+    panel in devpage.py."""
+    pool: McpPool = request.app["mcp_pool"]
+    return web.json_response({"ok": True, "servers": pool.mcp_status()})
+
+
+# ---------------------------------------------------------------------------
+# Conversations
+# ---------------------------------------------------------------------------
 
 async def _list_conversations(request: web.Request) -> web.Response:
     store: ConversationStore = request.app["store"]
@@ -100,21 +137,186 @@ async def _create_conversation(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Keys + Settings
+# ---------------------------------------------------------------------------
+
+async def _get_keys_status(request: web.Request) -> web.Response:
+    cfg: ChatBackendConfig = request.app["cfg"]
+    return web.json_response({
+        "ok": True,
+        "profile_dir": cfg.profile_dir,
+        "keys": keys_mod.status(cfg.profile_dir),
+    })
+
+
+async def _post_keys(request: web.Request) -> web.Response:
+    """Body: ``{"provider": "anthropic"|"openai", "value": "<key>"}``.
+    Writes the file and chmods 0600. Empty value deletes the file."""
+    cfg: ChatBackendConfig = request.app["cfg"]
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return web.json_response({"error": "invalid json"}, status=400)
+    provider = (body.get("provider") or "").strip()
+    if provider not in keys_mod.KNOWN_PROVIDERS:
+        return web.json_response(
+            {"error": f"unknown provider: {provider!r}"}, status=400)
+    value = (body.get("value") or "").strip()
+    if not value:
+        keys_mod.delete_key(cfg.profile_dir, provider)
+        return web.json_response({"ok": True, "deleted": True,
+                                  "provider": provider})
+    path = keys_mod.write_key(cfg.profile_dir, provider, value)
+    return web.json_response({
+        "ok": True, "provider": provider, "path": str(path),
+    })
+
+
+async def _get_settings(request: web.Request) -> web.Response:
+    return web.json_response({"ok": True, "settings": user_settings.load()})
+
+
+async def _put_settings(request: web.Request) -> web.Response:
+    """Partial-merge body into operator settings."""
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return web.json_response({"error": "invalid json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "expected json object"}, status=400)
+    merged = user_settings.patch(body)
+    return web.json_response({"ok": True, "settings": merged})
+
+
+# ---------------------------------------------------------------------------
+# STT / TTS / Announce
+# ---------------------------------------------------------------------------
+
+async def _post_stt(request: web.Request) -> web.Response:
+    cfg: ChatBackendConfig = request.app["cfg"]
+    api_key = cfg.openai_key()
+    if not api_key:
+        return web.json_response(
+            {"ok": False, "error": "OpenAI API key not set"}, status=400)
+    try:
+        reader = await request.multipart()
+    except Exception as exc:
+        return web.json_response(
+            {"ok": False, "error": f"multipart parse: {exc}"}, status=400)
+    audio_bytes = b""
+    filename = "speech.webm"
+    lang = (request.query.get("lang") or "ja").strip()
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name == "audio":
+            audio_bytes = await part.read(decode=False)
+            filename = part.filename or filename
+        elif part.name == "lang":
+            txt = await part.text()
+            if txt:
+                lang = txt.strip()
+    if not audio_bytes:
+        return web.json_response(
+            {"ok": False, "error": "no audio in request"}, status=400)
+    settings = user_settings.load()
+    lang = lang or settings.get("voice", {}).get("stt_lang", "ja")
+    try:
+        text = await voice_mod.whisper_stt(
+            api_key=api_key, audio_bytes=audio_bytes,
+            filename=filename, lang=lang,
+        )
+    except voice_mod.VoiceError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=502)
+    return web.json_response({
+        "ok": True, "text": text, "language": lang,
+        "size_bytes": len(audio_bytes),
+    })
+
+
+async def _post_tts(request: web.Request) -> web.StreamResponse:
+    """Body: ``{text, voice?, speed?}``. Returns audio/mpeg bytes."""
+    cfg: ChatBackendConfig = request.app["cfg"]
+    api_key = cfg.openai_key()
+    if not api_key:
+        return web.json_response(
+            {"ok": False, "error": "OpenAI API key not set"}, status=400)
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return web.json_response({"error": "invalid json"}, status=400)
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "empty text"}, status=400)
+    settings = user_settings.load().get("voice", {})
+    voice = body.get("voice") or settings.get("tts_voice", "alloy")
+    try:
+        speed = float(body.get("speed") or settings.get("tts_speed", 1.0))
+    except (TypeError, ValueError):
+        speed = 1.0
+    model = body.get("model") or settings.get("tts_model", "tts-1")
+    try:
+        audio = await voice_mod.openai_tts(
+            api_key=api_key, text=text, voice=voice,
+            speed=speed, model=model, fmt="mp3",
+        )
+    except voice_mod.VoiceError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=502)
+    return web.Response(body=audio, content_type="audio/mpeg")
+
+
+async def _broadcast_voice_announce(app: web.Application, *,
+                                    text: str, severity: str,
+                                    source: str) -> int:
+    """Push a ``voice_announce`` event to every connected /chat WS.
+    Returns the number of clients that received the message."""
+    msg = {
+        "type": "voice_announce",
+        "text": text,
+        "severity": severity,
+        "source": source,
+        "ts": time.time(),
+    }
+    clients = list(app.get("ws_clients") or [])
+    sent = 0
+    for ws in clients:
+        if ws.closed:
+            continue
+        try:
+            await ws.send_json(msg)
+            sent += 1
+        except Exception as exc:  # pragma: no cover
+            log.debug("voice_announce push failed: %s", exc)
+    return sent
+
+
+async def _post_announce(request: web.Request) -> web.Response:
+    """Body: ``{text, severity?, source?, voice?, speed?}``.
+    Fans the message out to every browser; each browser checks the
+    severity threshold + dedupe before actually playing TTS."""
+    try:
+        body = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return web.json_response({"error": "invalid json"}, status=400)
+    text = (body.get("text") or "").strip()
+    if not text:
+        return web.json_response({"error": "empty text"}, status=400)
+    severity = (body.get("severity") or "info").strip().lower()
+    source = (body.get("source") or "manual").strip()
+    sent = await _broadcast_voice_announce(
+        request.app, text=text, severity=severity, source=source)
+    log.info("[announce] severity=%s source=%s sent=%d text=%r",
+             severity, source, sent, text[:80])
+    return web.json_response({
+        "ok": True, "delivered_to": sent,
+        "severity": severity, "source": source,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Auto-diagnose entry point
 # ---------------------------------------------------------------------------
-#
-# Called by vlabor_dashboard whenever a /vlabor/health component flips to
-# ``critical`` (per-component cooldown applied on the dashboard side). The
-# endpoint mints a fresh conversation tagged ``origin=auto``, kicks off a
-# background task that runs the chat-loop with a templated prompt, and
-# returns immediately so the dashboard's 1Hz health timer isn't blocked.
-#
-# Output is persisted to the conversation store; the dashboard's chat
-# tab can poll /api/conversations to surface the new session as an alert.
-# A live-tail WebSocket is intentionally out of scope for this slice —
-# the conversation list refresh is enough for the operator UX, and adding
-# a pubsub channel would make the storage path more complex than it is
-# at this stage of the project.
 
 _DIAGNOSE_SYSTEM_PROMPT = (
     "あなたは VLAbor の自動診断エージェントです。critical 異常検知により"
@@ -141,35 +343,66 @@ _DIAGNOSE_SYSTEM_PROMPT = (
 )
 
 
+def _final_assistant_text(messages: list[dict[str, Any]]) -> str:
+    """Pull the most recent assistant message's text content out for
+    the diagnose voice announcement. Tool_use blocks are skipped."""
+    for m in reversed(messages):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [
+                b.get("text") or "" for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            joined = "\n".join(p for p in parts if p).strip()
+            if joined:
+                return joined
+    return ""
+
+
 async def _run_diagnose_session(app: web.Application, cid: str,
                                 trigger: dict) -> None:
     """Background coroutine: drives one chat-loop turn for an
-    auto-triggered diagnosis. Stores the transcript on completion.
-    Handles errors gracefully — the dashboard already moved on after
-    POSTing, so any failure here is logged, not surfaced upstream."""
+    auto-triggered diagnosis. Stores transcript + announces voice if
+    settings allow."""
     cfg: ChatBackendConfig = app["cfg"]
     pool: McpPool = app["mcp_pool"]
     store: ConversationStore = app["store"]
-    api_key = read_api_key(cfg.api_key_path)
+    settings = user_settings.load()
+    chat_settings = settings.get("chat", {})
+    provider_name = chat_settings.get("provider") or "anthropic"
+    model = chat_settings.get("model") or ""
+
+    if provider_name == "openai":
+        api_key = cfg.openai_key()
+    else:
+        api_key = cfg.anthropic_key()
     if not api_key:
-        log.warning("[diagnose] no API key at %s — skipping session %s",
-                    cfg.api_key_path, cid)
+        log.warning("[diagnose] no %s key — skipping session %s",
+                    provider_name, cid)
         store.set_meta(cid, origin="auto", trigger=trigger,
-                       title="自動診断: APIキー未設定でスキップ")
+                       provider=provider_name,
+                       title=f"自動診断: {provider_name} APIキー未設定でスキップ")
         return
 
     components = trigger.get("components") or []
     user_prompt_lines = ["異常検知。以下のコンポーネントが critical です:"]
+    severities: list[str] = []
     for c in components:
         line = f"- id={c.get('id')} label={c.get('label')} "
         line += f"severity={c.get('severity')} message={c.get('message')!r}"
         if c.get("visual_anchor_frame"):
             line += f" anchor={c['visual_anchor_frame']}"
         user_prompt_lines.append(line)
+        if c.get("severity"):
+            severities.append(str(c["severity"]))
     user_prompt_lines.append("\n上記の手順に従って診断してください。")
     user_text = "\n".join(user_prompt_lines)
 
-    messages: list[dict] = [
+    messages: list[dict[str, Any]] = [
         {"role": "user", "content": [
             {"type": "text", "text": _DIAGNOSE_SYSTEM_PROMPT + "\n\n" + user_text}
         ]}
@@ -177,18 +410,16 @@ async def _run_diagnose_session(app: web.Application, cid: str,
     title = "自動診断: " + ", ".join(
         str(c.get("label") or c.get("id") or "?") for c in components
     )[:60]
-    store.set_meta(cid, origin="auto", trigger=trigger, title=title)
+    store.set_meta(cid, origin="auto", trigger=trigger,
+                   provider=provider_name, title=title)
 
-    client = AsyncAnthropic(api_key=api_key)
     try:
-        from .chat_loop import run_chat
         async for _event in run_chat(
-            client=client, model=cfg.anthropic_model,
-            messages=messages, pool=pool,
+            model=model, messages=messages, pool=pool,
+            provider=provider_name, api_key=api_key,
         ):
-            # Drain events: nothing live-streams them, but the chat
-            # loop appends to ``messages`` only after each iteration.
-            # We just keep the loop going until ``done``.
+            # Drain events: nothing live-streams them — we just keep the
+            # loop going until it yields ``done`` or ``error``.
             pass
     except Exception as exc:  # pragma: no cover — surfaced to log only
         log.exception("[diagnose] session %s failed: %s", cid, exc)
@@ -196,23 +427,32 @@ async def _run_diagnose_session(app: web.Application, cid: str,
             {"type": "text", "text": f"(診断中にエラー: {exc})"}
         ]})
     store.save(cid, messages)
-    store.set_meta(cid, origin="auto", trigger=trigger, title=title)
-    log.info("[diagnose] session %s done (%d messages)", cid, len(messages))
+    store.set_meta(cid, origin="auto", trigger=trigger,
+                   provider=provider_name, title=title)
+    log.info("[diagnose] session %s done (%d messages, provider=%s)",
+             cid, len(messages), provider_name)
+
+    # Voice announce the conclusion (if enabled). Re-load the settings
+    # right before checking so the operator can toggle voice off
+    # mid-session via the Settings modal and stop the announcement
+    # at the door, without having to restart the agent.
+    voice_settings = user_settings.load().get("voice", {})
+    if voice_settings.get("notify_diagnose"):
+        text = _final_assistant_text(messages)
+        if text:
+            # Pick the worst severity in the trigger as the announce
+            # severity so notify_severity_min thresholding works as
+            # expected on the browser side.
+            sev = "critical" if "critical" in severities else (
+                  "warning" if "warning" in severities else "info")
+            await _broadcast_voice_announce(
+                app, text=text, severity=sev,
+                source=f"auto-diagnose-{cid}",
+            )
 
 
 async def _post_diagnose(request: web.Request) -> web.Response:
-    """Auto-diagnose trigger from vlabor_dashboard. Body schema::
-
-        {"trigger": "auto", "profile": "...",
-         "components": [
-            {"id": "d405_color", "label": "...", "severity": "critical",
-             "message": "...", "remediation": "...",
-             "visual_anchor_frame": "d405_link", "category": "device"}
-         ]}
-
-    Returns the freshly minted conversation id immediately; the actual
-    LLM run happens in a background asyncio task.
-    """
+    """Auto-diagnose trigger from vlabor_dashboard."""
     try:
         body = await request.json()
     except (ValueError, json.JSONDecodeError):
@@ -223,7 +463,6 @@ async def _post_diagnose(request: web.Request) -> web.Response:
     if not isinstance(components, list) or not components:
         return web.json_response(
             {"error": "components[] required"}, status=400)
-
     store: ConversationStore = request.app["store"]
     cid = store.create()
     asyncio.get_event_loop().create_task(
@@ -233,81 +472,97 @@ async def _post_diagnose(request: web.Request) -> web.Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# Chat WebSocket
+# ---------------------------------------------------------------------------
+
 async def _ws_chat(request: web.Request) -> web.WebSocketResponse:
     cfg: ChatBackendConfig = request.app["cfg"]
     pool: McpPool = request.app["mcp_pool"]
 
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
+    request.app.setdefault("ws_clients", set()).add(ws)
 
-    # Don't close the connection on missing API key — that triggers a
-    # reconnect storm in any auto-reconnecting client. Just keep the
-    # socket open and reject individual messages until the operator
-    # drops a key in place.
+    try:
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            try:
+                payload = json.loads(msg.data)
+            except json.JSONDecodeError:
+                await ws.send_json({"type": "error", "message": "invalid json"})
+                continue
+            if payload.get("type") != "user_message":
+                await ws.send_json(
+                    {"type": "error",
+                     "message": f"unsupported type {payload.get('type')}"}
+                )
+                continue
 
-    async for msg in ws:
-        if msg.type != WSMsgType.TEXT:
-            continue
-        try:
-            payload = json.loads(msg.data)
-        except json.JSONDecodeError:
-            await ws.send_json({"type": "error", "message": "invalid json"})
-            continue
-        if payload.get("type") != "user_message":
-            await ws.send_json(
-                {"type": "error", "message": f"unsupported type {payload.get('type')}"}
-            )
-            continue
-
-        # Re-read the key on every turn so a fresh save shows up
-        # without dropping the WS.
-        api_key = read_api_key(cfg.api_key_path)
-        if not api_key:
-            await ws.send_json(
-                {
+            settings = user_settings.load()
+            chat_settings = settings.get("chat", {})
+            provider_name = chat_settings.get("provider") or "anthropic"
+            model = chat_settings.get("model") or ""
+            if provider_name == "openai":
+                api_key = cfg.openai_key()
+            else:
+                api_key = cfg.anthropic_key()
+            if not api_key:
+                await ws.send_json({
                     "type": "error",
-                    "message": f"no API key at {cfg.api_key_path} — save one and try again",
-                }
-            )
-            await ws.send_json({"type": "done", "stop_reason": "no_api_key"})
-            continue
+                    "message": (f"no {provider_name} API key set — "
+                                f"open Settings and save one"),
+                })
+                await ws.send_json({"type": "done", "stop_reason": "no_api_key"})
+                continue
 
-        text = (payload.get("text") or "").strip()
-        if not text:
-            await ws.send_json({"type": "error", "message": "empty text"})
-            continue
-        history = payload.get("history") or []
-        if not isinstance(history, list):
-            history = []
-        # Each user turn carries the conversation_id (or none for first
-        # turn — backend mints one and announces it). Persisting on
-        # the server side means a tab refresh, a different browser, or
-        # a different machine all see the same chat history.
-        store: ConversationStore = request.app["store"]
-        cid = (payload.get("conversation_id") or "").strip()
-        if not cid:
-            cid = store.create()
-            await ws.send_json({"type": "conversation_created", "id": cid})
+            text = (payload.get("text") or "").strip()
+            if not text:
+                await ws.send_json({"type": "error", "message": "empty text"})
+                continue
+            history = payload.get("history") or []
+            if not isinstance(history, list):
+                history = []
+            metadata = payload.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            input_mode = (metadata.get("input_mode") or "text").lower()
 
-        messages = list(history)
-        messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+            store: ConversationStore = request.app["store"]
+            cid = (payload.get("conversation_id") or "").strip()
+            if not cid:
+                cid = store.create()
+                await ws.send_json({"type": "conversation_created", "id": cid})
 
-        client = AsyncAnthropic(api_key=api_key)
-        async for event in run_chat(
-            client=client,
-            model=cfg.anthropic_model,
-            messages=messages,
-            pool=pool,
-        ):
-            await ws.send_json(event)
-        # The chat loop mutates ``messages`` in place; echo the final
-        # transcript back so the client can persist it, and write the
-        # authoritative copy to disk.
-        store.save(cid, messages)
-        await ws.send_json({"type": "transcript", "conversation_id": cid, "messages": messages})
+            messages = list(history)
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": text}]})
+
+            async for event in run_chat(
+                model=model, messages=messages, pool=pool,
+                provider=provider_name, api_key=api_key,
+            ):
+                await ws.send_json(event)
+            store.save(cid, messages)
+            store.set_meta(cid, provider=provider_name,
+                           last_input_mode=input_mode)
+            await ws.send_json({
+                "type": "transcript",
+                "conversation_id": cid,
+                "messages": messages,
+            })
+    finally:
+        clients = request.app.get("ws_clients")
+        if clients is not None:
+            clients.discard(ws)
 
     return ws
 
+
+# ---------------------------------------------------------------------------
+# Boot
+# ---------------------------------------------------------------------------
 
 def build_app(cfg: ChatBackendConfig) -> web.Application:
     app = web.Application()
@@ -321,6 +576,14 @@ def build_app(cfg: ChatBackendConfig) -> web.Application:
     app.router.add_post("/api/conversations", _create_conversation)
     app.router.add_get(r"/api/conversations/{cid}", _get_conversation)
     app.router.add_delete(r"/api/conversations/{cid}", _delete_conversation)
+    app.router.add_get("/api/keys/status", _get_keys_status)
+    app.router.add_post("/api/keys", _post_keys)
+    app.router.add_get("/api/mcp/status", _get_mcp_status)
+    app.router.add_get("/api/settings", _get_settings)
+    app.router.add_put("/api/settings", _put_settings)
+    app.router.add_post("/api/stt", _post_stt)
+    app.router.add_post("/api/tts", _post_tts)
+    app.router.add_post("/api/announce", _post_announce)
     app.router.add_post("/diagnose", _post_diagnose)
     return app
 
@@ -332,8 +595,8 @@ def main() -> None:
     )
     cfg = ChatBackendConfig.load()
     log.info(
-        "[boot] vlabor_agent chat_backend host=%s port=%d model=%s",
-        cfg.host, cfg.port, cfg.anthropic_model,
+        "[boot] vlabor_agent chat_backend host=%s port=%d profile_dir=%s",
+        cfg.host, cfg.port, cfg.profile_dir,
     )
     app = build_app(cfg)
     try:

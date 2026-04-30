@@ -27,6 +27,7 @@ RUN apt-get update \
 # versions if they differ.
 RUN pip install \
       "anthropic>=0.40.0" \
+      "openai>=1.40.0" \
       "aiohttp>=3.10.0" \
       "mcp>=1.0.0" \
       "pydantic>=2.5.0"
