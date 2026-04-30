@@ -873,6 +873,35 @@ let ws = null;
 let inflight = false;
 let activeAssistantBubble = null;
 let conversationId = null;
+let inflightStartedAt = 0;
+let lastWsMessageAt = 0;
+
+// Format a CloseEvent into a human-readable cause string. Browsers
+// strip most network-layer detail for security, so the close code is
+// often the only signal we have for diagnosis.
+function describeWsClose(ev) {
+  const code = ev && typeof ev.code === 'number' ? ev.code : 0;
+  const reason = ev && ev.reason ? String(ev.reason) : '';
+  const meanings = {
+    1000: 'normal close',
+    1001: 'going away (page unload?)',
+    1005: 'no status (peer dropped without code)',
+    1006: 'abnormal close — no clean shutdown (network drop, proxy idle, browser tab killed, or server crashed)',
+    1011: 'server internal error',
+    1012: 'server restart',
+    1013: 'try again later (server overloaded?)',
+    1015: 'TLS failure',
+  };
+  const parts = [meanings[code] || ('code ' + code)];
+  if (reason) parts.push('reason: "' + reason + '"');
+  if (lastWsMessageAt) {
+    parts.push(Math.round((Date.now() - lastWsMessageAt) / 1000) + 's since last server msg');
+  }
+  if (inflightStartedAt) {
+    parts.push(Math.round((Date.now() - inflightStartedAt) / 1000) + 's into turn');
+  }
+  return parts.join('; ');
+}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -989,16 +1018,18 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/chat`);
   ws.addEventListener('open', () => setWsStatus('open'));
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (ev) => {
     setWsStatus('closed');
     // If a turn was in flight when the socket dropped, no `done`/`error`
     // event will ever arrive — clear the stuck state so the user can try
     // again instead of staring at a permanently-disabled send button.
+    // Surface the close code / reason so the user can tell whether it
+    // was a clean shutdown, a server crash, or a network drop.
     if (inflight) {
       inflight = false;
       sendBtn.disabled = false;
       activeAssistantBubble = null;
-      appendSystem('(connection lost — please retry)');
+      appendSystem('(connection lost — ' + describeWsClose(ev) + ' — please retry)');
     }
     setTimeout(connect, 2000);
   });
@@ -1011,6 +1042,7 @@ function connect() {
     }
   });
   ws.addEventListener('message', (ev) => {
+    lastWsMessageAt = Date.now();
     let m;
     try { m = JSON.parse(ev.data); } catch (_) { return; }
     if (m.type === 'assistant_text_delta') appendAssistantText(m.text);
@@ -1067,6 +1099,8 @@ function submit() {
   if (!text || inflight || !ws || ws.readyState !== WebSocket.OPEN) return;
   inflight = true;
   sendBtn.disabled = true;
+  inflightStartedAt = Date.now();
+  lastWsMessageAt = 0;
   addUser(text);
   input.value = '';
   autoSize();
@@ -1794,6 +1828,8 @@ async function onRecordingStopped() {
   }
   inflight = true;
   sendBtn.disabled = true;
+  inflightStartedAt = Date.now();
+  lastWsMessageAt = 0;
   addUser(text);
   ws.send(JSON.stringify({
     type: 'user_message',
