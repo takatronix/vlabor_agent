@@ -6,8 +6,9 @@
 # Build context: vlabor_agent repo root (so chat_backend/ が見える).
 #   docker build -f docker/Dockerfile -t vlabor-agent:local .
 #
-# Runtime: chat_backend を /app/chat_backend に bind-mount する想定。
-# editable install でソース編集が即反映される (vlabor_dashboard と同パターン)。
+# Runtime image includes chat_backend. Development can still override the
+# build context with VLABOR_AGENT_SRC, but release machines do not need a
+# host-side bind mount.
 
 FROM python:3.12-slim
 
@@ -33,8 +34,7 @@ RUN pip install \
       "pydantic>=2.5.0"
 
 WORKDIR /app/chat_backend
+COPY chat_backend/ /app/chat_backend/
+RUN pip install --no-deps -e .
 
-# Editable install at startup so the bind-mounted source registers as
-# the chat_backend package without re-downloading deps. exec ensures
-# Python becomes PID 1 for clean signal handling.
-CMD ["sh", "-c", "pip install --no-deps -e . && exec python -m chat_backend.server"]
+CMD ["python", "-m", "chat_backend.server"]
