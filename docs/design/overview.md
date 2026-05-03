@@ -196,7 +196,7 @@ bt_runtime が回す → web-ui には status 進捗をストリーム。
 
 ## 次回 cold-start 時にやること
 
-1. ✓ リポジトリ作成 (`~/ros2_ws/src/vlabor_agent` + GitHub `takatronix/vlabor_agent`)
+1. ✓ リポジトリ作成 (`~/ros2_ws/src/vlabor_agent` + GitHub `percus-ai/vlabor_agent`)
 2. Phase 0 実装 (chat_backend Hello World — Anthropic API でテキスト往復のみ)
 3. vlabor-obs を MCP として呼べることを確認 (chat の tool_use ループ)
 4. BT の最小 schema 固める (JSON schema 書き出す + サンプル tree 1 つ)
